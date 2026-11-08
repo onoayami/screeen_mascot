@@ -6,6 +6,7 @@ const {
   dialog,
   ipcMain,
   nativeImage,
+  powerMonitor,
   screen,
   shell,
 } = require('electron');
@@ -43,12 +44,41 @@ let allowSettingsClose = false;
 let settingsClosePromptPending = false;
 let quitRequested = false;
 let pointerSyncTimer = null;
+let mascotWatchdogTimer = null;
+let mascotRecoveryTimer = null;
+let unresponsiveTimer = null;
+let rendererReloadTimer = null;
+let mascotHiddenByUser = false;
+let recoveryMonitoringStarted = false;
+let rendererFailureCount = 0;
+let rendererReloadStopped = false;
+let rendererIsUnresponsive = false;
+let lastRendererReloadAt = -Infinity;
+let rendererReloadReason = '';
 let preparedCharacterDirectory = null;
 const pendingApplyRequests = new Map();
+const RECOVERY_TIMING = {
+  watchdogIntervalMs: 2000,
+  recoveryDelayMs: 2000,
+  unresponsiveTimeoutMs: 5000,
+  rendererReloadCooldownMs: 10000,
+  watchdogRepairLimit: 5,
+  watchdogRepairWindowMs: 60000,
+  watchdogRepairCooldownMs: 60000,
+};
+const MAX_CONSECUTIVE_RENDERER_FAILURES = 3;
+const DIAGNOSTIC_LOG_MAX_BYTES = 1024 * 1024;
+const watchdogRepairHistory = new Map();
+const RENDERER_DIAGNOSTIC_TYPES = new Set([
+  'window-error',
+  'unhandled-rejection',
+  'image-load-failed',
+]);
 
 app.on('before-quit', () => {
   quitRequested = true;
 });
+app.on('will-quit', () => recordDiagnostic('app-quit'));
 
 const LEGACY_CAT_PAW_SHA256 = 'b09160f6eb8006787e487390c3b12a6711aa96c6120402d22b92bf53a7de0a92';
 const LEGACY_DEFAULT_ASSET_SHA256 = Object.freeze({
@@ -64,6 +94,66 @@ const validateImageDecodes = createImageDecodeValidator({ nativeImage });
 
 function getCharacterDirectory() {
   return path.join(app.getPath('userData'), 'characters');
+}
+
+function diagnosticBounds(bounds) {
+  return {
+    x: Number.isFinite(bounds?.x) ? Math.round(bounds.x) : null,
+    y: Number.isFinite(bounds?.y) ? Math.round(bounds.y) : null,
+    width: Number.isFinite(bounds?.width) ? Math.round(bounds.width) : null,
+    height: Number.isFinite(bounds?.height) ? Math.round(bounds.height) : null,
+  };
+}
+
+function getDisplayDiagnostics() {
+  const displays = screen.getAllDisplays();
+  return {
+    displayCount: displays.length,
+    resolutions: displays.map((display) => ({
+      width: Math.round(display.bounds.width),
+      height: Math.round(display.bounds.height),
+    })),
+  };
+}
+
+function recordDiagnostic(event, details = {}) {
+  const filePath = path.join(app.getPath('userData'), 'mascot-diagnostics.log');
+  const line = `${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event,
+    ...details,
+  })}\n`;
+
+  try {
+    let currentSize = 0;
+    try {
+      currentSize = fs.statSync(filePath).size;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+
+    if (currentSize + Buffer.byteLength(line, 'utf8') > DIAGNOSTIC_LOG_MAX_BYTES) {
+      const oldFilePath = path.join(app.getPath('userData'), 'mascot-diagnostics.old.log');
+      if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
+      if (currentSize > 0) fs.renameSync(filePath, oldFilePath);
+    }
+
+    fs.appendFileSync(filePath, line, { encoding: 'utf8', mode: 0o600 });
+  } catch (error) {
+    console.warn('診断ログを書き込めませんでした。', String(error?.message || error));
+  }
+}
+
+function mascotWindowSnapshot() {
+  if (!mascotWindow || mascotWindow.isDestroyed()) return { exists: false };
+  return {
+    exists: true,
+    bounds: diagnosticBounds(mascotWindow.getBounds()),
+    visible: mascotWindow.isVisible(),
+    alwaysOnTop: typeof mascotWindow.isAlwaysOnTop === 'function'
+      ? mascotWindow.isAlwaysOnTop()
+      : null,
+  };
 }
 
 function getBundledCharacterDirectory() {
@@ -158,9 +248,30 @@ function ensureCharacterDirectory() {
 
   assertCharacterDirectoryRoot(destination);
   migrateLegacyDefaultAssets(source, destination);
+  removeStaleConfigTemporaryFiles(destination);
 
   preparedCharacterDirectory = destination;
   return destination;
+}
+
+function removeStaleConfigTemporaryFiles(directory) {
+  const temporaryNamePattern = /^config(?:\.backup)?\.json\.\d+\.[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.tmp$/i;
+  let entries;
+  try {
+    entries = fs.readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    console.warn('設定の一時ファイルを確認できませんでした。', error);
+    return;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isFile() || !temporaryNamePattern.test(entry.name)) continue;
+    try {
+      fs.unlinkSync(path.join(directory, entry.name));
+    } catch (error) {
+      console.warn(`設定の一時ファイルを削除できませんでした：${entry.name}`, error);
+    }
+  }
 }
 
 function requireCharacterPath(relativePath) {
@@ -496,21 +607,22 @@ function importImageFromPath(sourcePath, category) {
 }
 
 function saveTransparentPng(arrayBuffer, category, originalName) {
-  let pngBuffer;
+  let pngBytes;
   if (arrayBuffer instanceof ArrayBuffer) {
-    pngBuffer = Buffer.from(new Uint8Array(arrayBuffer));
+    pngBytes = new Uint8Array(arrayBuffer);
   } else if (ArrayBuffer.isView(arrayBuffer)) {
-    pngBuffer = Buffer.from(arrayBuffer.buffer, arrayBuffer.byteOffset, arrayBuffer.byteLength);
+    pngBytes = new Uint8Array(arrayBuffer.buffer, arrayBuffer.byteOffset, arrayBuffer.byteLength);
   } else {
     throw new Error('変換した画像データを受け取れませんでした。');
   }
 
+  if (pngBytes.byteLength > MAX_IMAGE_FILE_BYTES) throw new Error('変換後の画像は20MB以下にしてください。');
+  const pngBuffer = Buffer.from(pngBytes);
   const pngSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
   const hasPngSignature = pngBuffer.length >= pngSignature.length
     && pngSignature.every((byte, index) => pngBuffer[index] === byte);
 
   if (!hasPngSignature) throw new Error('PNGへの変換に失敗しました。');
-  if (pngBuffer.length > MAX_IMAGE_FILE_BYTES) throw new Error('変換後の画像は20MB以下にしてください。');
 
   const { characterRoot, destinationDirectory } = ensureAssetCategoryDirectory(category);
   const originalBase = path.parse(path.basename(String(originalName || 'image'))).name;
@@ -604,6 +716,174 @@ function ensureMascotWindowOnScreen({ preferCursor = false, centerMascot = false
   return needsMove;
 }
 
+function boundsMatchWorkArea(bounds, workArea) {
+  return ['x', 'y', 'width', 'height'].every((key) => (
+    Number.isFinite(bounds?.[key])
+    && Number.isFinite(workArea?.[key])
+    && Math.abs(bounds[key] - workArea[key]) < 1
+  ));
+}
+
+function canRepairWatchdogIssue(repair) {
+  const now = Date.now();
+  const windowMs = RECOVERY_TIMING.watchdogRepairWindowMs;
+  const history = watchdogRepairHistory.get(repair) || { attempts: [], blocked: false };
+  if (history.blocked) return false;
+
+  history.attempts = history.attempts.filter((timestamp) => now - timestamp < windowMs);
+  if (history.attempts.length >= RECOVERY_TIMING.watchdogRepairLimit) {
+    const count = history.attempts.length + 1;
+    const cooldownMs = RECOVERY_TIMING.watchdogRepairCooldownMs;
+    history.blocked = true;
+    history.attempts = [];
+    watchdogRepairHistory.set(repair, history);
+    const timer = setTimeout(() => {
+      if (watchdogRepairHistory.get(repair) === history) {
+        watchdogRepairHistory.delete(repair);
+      }
+    }, cooldownMs);
+    timer.unref?.();
+    recordDiagnostic('watchdog-backoff', {
+      repair,
+      count,
+      windowMs,
+      cooldownMs,
+    });
+    return false;
+  }
+
+  history.attempts.push(now);
+  watchdogRepairHistory.set(repair, history);
+  return true;
+}
+
+function attemptMascotRendererReload() {
+  if (!mascotWindow || mascotWindow.isDestroyed() || rendererReloadStopped) return false;
+  const remainingCooldown = RECOVERY_TIMING.rendererReloadCooldownMs
+    - (Date.now() - lastRendererReloadAt);
+  if (remainingCooldown > 0) {
+    if (!rendererReloadTimer) {
+      rendererReloadTimer = setTimeout(() => {
+        rendererReloadTimer = null;
+        attemptMascotRendererReload();
+      }, remainingCooldown);
+      rendererReloadTimer.unref?.();
+    }
+    return true;
+  }
+
+  lastRendererReloadAt = Date.now();
+  try {
+    mascotWindow.webContents.reload();
+    recordDiagnostic('renderer-reload', { reason: rendererReloadReason });
+    return true;
+  } catch (error) {
+    recordDiagnostic('renderer-reload-failed', { reason: rendererReloadReason });
+    console.warn('マスコット画面を再読み込みできませんでした。', String(error?.message || error));
+    return false;
+  }
+}
+
+function handleMascotRendererFailure(reason) {
+  if (!mascotWindow || mascotWindow.isDestroyed() || rendererReloadStopped) return false;
+  failPendingApplyRequests('マスコット画面の処理が停止しました。');
+  rendererFailureCount += 1;
+  rendererReloadReason = reason;
+  recordDiagnostic('renderer-failure', {
+    reason,
+    consecutiveFailures: rendererFailureCount,
+  });
+
+  if (rendererFailureCount >= MAX_CONSECUTIVE_RENDERER_FAILURES) {
+    rendererReloadStopped = true;
+    clearTimeout(rendererReloadTimer);
+    rendererReloadTimer = null;
+    recordDiagnostic('renderer-recovery-stopped', { consecutiveFailures: rendererFailureCount });
+    dialog.showErrorBox(
+      'マスコットを復旧できませんでした',
+      'マスコット画面が続けて停止しました。アプリを再起動してください。',
+    );
+    return false;
+  }
+
+  return attemptMascotRendererReload();
+}
+
+function runMascotWatchdog(reason = 'periodic') {
+  if (!mascotWindow || mascotWindow.isDestroyed()) return false;
+  const before = mascotWindowSnapshot();
+  const bounds = mascotWindow.getBounds();
+  const displays = screen.getAllDisplays();
+  const matchesWorkArea = displays.some(({ workArea }) => boundsMatchWorkArea(bounds, workArea));
+  const repairs = [];
+
+  if (displays.length > 0 && !matchesWorkArea) {
+    const overlapsDisplay = displays.some(
+      ({ workArea }) => rectangleIntersectionArea(bounds, workArea) > 0,
+    );
+    const repair = overlapsDisplay ? 'bounds-do-not-match-display' : 'outside-displays';
+    if (canRepairWatchdogIssue(repair) && ensureMascotWindowOnScreen()) {
+      repairs.push(repair);
+    }
+  }
+
+  if (!mascotWindow.isVisible() && !mascotHiddenByUser) {
+    if (canRepairWatchdogIssue('unexpectedly-hidden')) {
+      mascotWindow.showInactive();
+      mascotWindow.setIgnoreMouseEvents(true, { forward: true });
+      synchronizeMascotPassthrough();
+      repairs.push('unexpectedly-hidden');
+    }
+  }
+
+  if (
+    (!settingsWindow || settingsWindow.isDestroyed() || !settingsWindow.isVisible())
+    && typeof mascotWindow.isAlwaysOnTop === 'function'
+    && !mascotWindow.isAlwaysOnTop()
+  ) {
+    if (canRepairWatchdogIssue('always-on-top')) {
+      mascotWindow.setAlwaysOnTop(true, 'floating');
+      repairs.push('always-on-top');
+    }
+  }
+
+  if (repairs.length === 0) return false;
+  recordDiagnostic('watchdog-repaired', {
+    reason,
+    repairs,
+    before,
+    after: mascotWindowSnapshot(),
+  });
+  return true;
+}
+
+function scheduleEnvironmentRecovery(reason) {
+  recordDiagnostic(reason, getDisplayDiagnostics());
+  clearTimeout(mascotRecoveryTimer);
+  mascotRecoveryTimer = setTimeout(() => {
+    mascotRecoveryTimer = null;
+    runMascotWatchdog(reason);
+  }, RECOVERY_TIMING.recoveryDelayMs);
+  mascotRecoveryTimer.unref?.();
+}
+
+function startMascotRecoveryMonitoring() {
+  if (recoveryMonitoringStarted) return;
+  recoveryMonitoringStarted = true;
+  recordDiagnostic('app-start', getDisplayDiagnostics());
+  mascotWatchdogTimer = setInterval(
+    () => runMascotWatchdog(),
+    RECOVERY_TIMING.watchdogIntervalMs,
+  );
+  mascotWatchdogTimer.unref?.();
+
+  screen.on('display-added', () => scheduleEnvironmentRecovery('display-added'));
+  screen.on('display-removed', () => scheduleEnvironmentRecovery('display-removed'));
+  screen.on('display-metrics-changed', () => scheduleEnvironmentRecovery('display-metrics-changed'));
+  powerMonitor.on('resume', () => scheduleEnvironmentRecovery('resume'));
+  powerMonitor.on('unlock-screen', () => scheduleEnvironmentRecovery('unlock-screen'));
+}
+
 function synchronizeMascotPassthrough() {
   if (!mascotWindow || mascotWindow.isDestroyed() || !mascotWindow.isVisible()) return false;
   try {
@@ -621,6 +901,7 @@ function synchronizeMascotPassthrough() {
 
 function recallMascotToCenter() {
   if (!mascotWindow || mascotWindow.isDestroyed()) return false;
+  mascotHiddenByUser = false;
   if (!mascotWindow.isVisible()) mascotWindow.showInactive();
   ensureMascotWindowOnScreen({ preferCursor: true, centerMascot: true });
   mascotWindow.setIgnoreMouseEvents(true, { forward: true });
@@ -678,32 +959,37 @@ function waitForMascotRenderer(timeoutMs = 10000) {
 async function applyConfigToMascot(previewActionIndex, configHash) {
   try {
     const webContents = await waitForMascotRenderer();
-    const requestId = `${Date.now()}-${++applyRequestCounter}`;
+    const sendApplyRequest = () => {
+      const requestId = `${Date.now()}-${++applyRequestCounter}`;
 
-    return await new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingApplyRequests.delete(requestId);
-        resolve({ ok: false, error: 'マスコットから反映完了の返答がありませんでした。' });
-      }, 15000);
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingApplyRequests.delete(requestId);
+          resolve({ ok: false, error: 'マスコットから反映完了の返答がありませんでした。' });
+        }, 15000);
 
-      pendingApplyRequests.set(requestId, {
-        resolve,
-        timer,
-        webContentsId: webContents.id,
-        expectedConfigHash: configHash,
-      });
-
-      try {
-        webContents.send('mascot:command', {
-          command: 'reload-config',
-          value: { requestId, previewActionIndex, configHash },
+        pendingApplyRequests.set(requestId, {
+          resolve,
+          timer,
+          webContentsId: webContents.id,
+          expectedConfigHash: configHash,
         });
-      } catch (error) {
-        clearTimeout(timer);
-        pendingApplyRequests.delete(requestId);
-        resolve({ ok: false, error: error.message });
-      }
-    });
+
+        try {
+          webContents.send('mascot:command', {
+            command: 'reload-config',
+            value: { requestId, previewActionIndex, configHash },
+          });
+        } catch (error) {
+          clearTimeout(timer);
+          pendingApplyRequests.delete(requestId);
+          resolve({ ok: false, error: error.message });
+        }
+      });
+    };
+
+    const firstResult = await sendApplyRequest();
+    return firstResult.superseded ? sendApplyRequest() : firstResult;
   } catch (error) {
     return { ok: false, error: error.message };
   }
@@ -716,15 +1002,19 @@ function setPaused(nextPaused) {
 }
 
 function toggleVisibility() {
-  if (!mascotWindow) return;
-  if (mascotWindow.isVisible()) mascotWindow.hide();
-  else {
+  if (!mascotWindow || mascotWindow.isDestroyed()) return false;
+  if (mascotWindow.isVisible()) {
+    mascotHiddenByUser = true;
+    mascotWindow.hide();
+  } else {
+    mascotHiddenByUser = false;
     ensureMascotWindowOnScreen();
     mascotWindow.showInactive();
     mascotWindow.setIgnoreMouseEvents(true, { forward: true });
     synchronizeMascotPassthrough();
   }
   rebuildTrayMenu();
+  return true;
 }
 
 function reportWindowLoadFailure(label, fileName, error) {
@@ -796,6 +1086,7 @@ function assertTrustedApplicationEvent(event) {
 
 function openSettingsWindow() {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
+    if (mascotWindow && !mascotWindow.isDestroyed()) mascotWindow.setAlwaysOnTop(false);
     settingsWindow.show();
     settingsWindow.focus();
     return;
@@ -821,6 +1112,7 @@ function openSettingsWindow() {
       sandbox: true,
     },
   });
+  const currentSettingsWindow = settingsWindow;
 
   configureWindowSecurity(settingsWindow, 'settings.html');
   loadWindowFileWithRecovery(settingsWindow, 'settings.html', '設定画面');
@@ -854,14 +1146,33 @@ function openSettingsWindow() {
       dialog.showErrorBox('設定画面を閉じられませんでした', String(error?.message || error));
     });
   });
-  settingsWindow.on('closed', () => {
-    settingsWindow = null;
-    settingsDirty = false;
-    allowSettingsClose = false;
-    settingsClosePromptPending = false;
-    if (mascotWindow && !mascotWindow.isDestroyed()) {
-      mascotWindow.setAlwaysOnTop(true, 'floating');
+  const restoreFloatingWhenUnavailable = (reason) => {
+    if (
+      settingsWindow
+      && !settingsWindow.isDestroyed()
+      && settingsWindow.isVisible()
+    ) return;
+    if (settingsWindow === currentSettingsWindow && currentSettingsWindow.isDestroyed()) {
+      settingsWindow = null;
+      settingsDirty = false;
+      allowSettingsClose = false;
+      settingsClosePromptPending = false;
     }
+    if (mascotWindow && !mascotWindow.isDestroyed() && !mascotWindow.isAlwaysOnTop()) {
+      mascotWindow.setAlwaysOnTop(true, 'floating');
+      recordDiagnostic('settings-window-unavailable', { reason });
+    }
+  };
+  settingsWindow.on('hide', () => restoreFloatingWhenUnavailable('hidden'));
+  settingsWindow.webContents.on('destroyed', () => restoreFloatingWhenUnavailable('destroyed'));
+  settingsWindow.on('closed', () => {
+    if (settingsWindow === currentSettingsWindow) {
+      settingsWindow = null;
+      settingsDirty = false;
+      allowSettingsClose = false;
+      settingsClosePromptPending = false;
+    }
+    restoreFloatingWhenUnavailable('closed');
   });
 }
 
@@ -887,6 +1198,10 @@ function rebuildTrayMenu() {
       },
       { type: 'separator' },
       { label: '画像・設定フォルダを開く', click: () => shell.openPath(getCharacterDirectory()) },
+      {
+        label: '診断ログを開く',
+        click: () => shell.showItemInFolder(path.join(app.getPath('userData'), 'mascot-diagnostics.log')),
+      },
       { label: '設定を再読み込み', click: () => sendMascotCommand('reload-config') },
       { type: 'separator' },
       { label: '終了', role: 'quit' },
@@ -895,6 +1210,7 @@ function rebuildTrayMenu() {
 }
 
 function createMascotWindow() {
+  mascotHiddenByUser = false;
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const { x, y, width, height } = display.workArea;
 
@@ -928,9 +1244,17 @@ function createMascotWindow() {
   }
   loadWindowFileWithRecovery(mascotWindow, 'index.html', 'マスコット画面');
   mascotWindow.webContents.on('did-finish-load', () => {
+    clearTimeout(unresponsiveTimer);
+    clearTimeout(rendererReloadTimer);
+    unresponsiveTimer = null;
+    rendererReloadTimer = null;
+    rendererIsUnresponsive = false;
+    rendererFailureCount = 0;
+    rendererReloadStopped = false;
     ensureMascotWindowOnScreen();
     sendMascotCommand('set-paused', paused);
     synchronizeMascotPassthrough();
+    recordDiagnostic('renderer-ready');
   });
   mascotWindow.on('show', () => {
     rebuildTrayMenu();
@@ -938,12 +1262,43 @@ function createMascotWindow() {
   });
   mascotWindow.on('hide', rebuildTrayMenu);
   mascotWindow.on('closed', () => {
+    clearTimeout(unresponsiveTimer);
+    clearTimeout(rendererReloadTimer);
+    unresponsiveTimer = null;
+    rendererReloadTimer = null;
+    rendererIsUnresponsive = false;
+    rendererFailureCount = 0;
+    rendererReloadStopped = false;
     mascotWindow = null;
+    mascotHiddenByUser = false;
     failPendingApplyRequests('マスコット画面が閉じられました。');
     rebuildTrayMenu();
   });
+  mascotWindow.on('unresponsive', () => {
+    rendererIsUnresponsive = true;
+    recordDiagnostic('renderer-unresponsive');
+    clearTimeout(unresponsiveTimer);
+    unresponsiveTimer = setTimeout(() => {
+      unresponsiveTimer = null;
+      if (rendererIsUnresponsive) handleMascotRendererFailure('unresponsive');
+    }, RECOVERY_TIMING.unresponsiveTimeoutMs);
+    unresponsiveTimer.unref?.();
+  });
+  mascotWindow.on('responsive', () => {
+    rendererIsUnresponsive = false;
+    clearTimeout(unresponsiveTimer);
+    unresponsiveTimer = null;
+    recordDiagnostic('renderer-responsive');
+  });
   mascotWindow.webContents.on('render-process-gone', () => {
-    failPendingApplyRequests('マスコット画面の処理が停止しました。');
+    rendererIsUnresponsive = false;
+    clearTimeout(unresponsiveTimer);
+    unresponsiveTimer = null;
+    handleMascotRendererFailure('render-process-gone');
+  });
+  mascotWindow.webContents.on('did-fail-load', (_event, _errorCode, _description, _url, isMainFrame) => {
+    if (isMainFrame === false) return;
+    handleMascotRendererFailure('did-fail-load');
   });
 }
 
@@ -988,6 +1343,7 @@ ipcMain.on('mascot:apply-result', (event, payload) => {
     && appliedHash === pending.expectedConfigHash;
   pending.resolve({
     ok: hashMatches,
+    superseded: Boolean(payload?.superseded),
     error: hashMatches
       ? null
       : (payload?.ok
@@ -996,6 +1352,12 @@ ipcMain.on('mascot:apply-result', (event, payload) => {
     actionName: payload?.actionName ? String(payload.actionName) : null,
     appliedHash: appliedHash || null,
   });
+});
+
+ipcMain.on('mascot:diagnostic', (event, diagnosticType) => {
+  if (!isTrustedWindowEvent(event, mascotWindow, 'index.html')) return;
+  if (!RENDERER_DIAGNOSTIC_TYPES.has(diagnosticType)) return;
+  recordDiagnostic('renderer-error', { kind: diagnosticType });
 });
 
 registerIpcHandler('mascot:load-config', 'application', () => loadNormalizedConfig());
@@ -1068,7 +1430,7 @@ registerIpcHandler('mascot:prepare-distribution-defaults', 'settings', () => {
 });
 
 registerIpcHandler('mascot:save-config', 'settings', async (_event, payload) => {
-  const input = payload?.config && typeof payload.config === 'object' ? payload.config : payload;
+  const input = payload?.config;
   const config = validateAndNormalizeConfig(input);
   const requestedIndex = payload?.previewActionIndex;
   const previewActionIndex = Number.isInteger(requestedIndex)
@@ -1106,14 +1468,7 @@ function startApplication() {
   ]));
   createMascotWindow();
   createTray();
-  let recoveryTimer = null;
-  const scheduleScreenRecovery = () => {
-    clearTimeout(recoveryTimer);
-    recoveryTimer = setTimeout(() => ensureMascotWindowOnScreen(), 120);
-  };
-  screen.on('display-added', scheduleScreenRecovery);
-  screen.on('display-removed', scheduleScreenRecovery);
-  screen.on('display-metrics-changed', scheduleScreenRecovery);
+  startMascotRecoveryMonitoring();
   clearInterval(pointerSyncTimer);
   pointerSyncTimer = setInterval(synchronizeMascotPassthrough, 750);
   pointerSyncTimer.unref?.();
@@ -1134,6 +1489,7 @@ if (hasSingleInstanceLock) {
   app.on('activate', () => {
     if (!mascotWindow) createMascotWindow();
     else {
+      mascotHiddenByUser = false;
       ensureMascotWindowOnScreen();
       mascotWindow.showInactive();
       synchronizeMascotPassthrough();

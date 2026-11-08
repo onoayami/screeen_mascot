@@ -13,8 +13,19 @@ const REQUIRED_MASCOT_API_METHODS = Object.freeze([
   'saveConfig',
 ]);
 
+const sharedRules = window.DesktopMascotConfigRules;
+const SETTINGS_RULES = sharedRules?.CONFIG_RULES;
+const DEFAULT_DURATION_MS = sharedRules?.DEFAULT_DURATION_MS;
+const MAX_ACTIONS = SETTINGS_RULES?.actionCount.maximum;
+const ALLOWED_MOVEMENTS = new Set(sharedRules?.ALLOWED_MOVEMENTS || []);
+const ALLOWED_FLIPS = new Set(sharedRules?.ALLOWED_FLIP_MODES || []);
+const ALLOWED_START_POSITIONS = new Set(sharedRules?.ALLOWED_START_POSITIONS || []);
+const mapWithConcurrency = window.DesktopMascotConcurrency?.mapWithConcurrency;
+
 const desktopApiAvailable = Boolean(
-  window.mascotAPI
+  sharedRules?.CONFIG_RULES
+  && typeof mapWithConcurrency === 'function'
+  && window.mascotAPI
   && REQUIRED_MASCOT_API_METHODS.every((method) => typeof window.mascotAPI[method] === 'function'),
 );
 
@@ -43,11 +54,14 @@ const elements = {
   deleteAction: document.getElementById('delete-action'),
   actionDropzone: document.getElementById('action-dropzone'),
   actionPreview: document.getElementById('action-preview'),
+  actionClippingStatus: document.getElementById('action-clipping-status'),
+  actionFitInFrame: document.getElementById('action-fit-in-frame'),
   actionPlaceholder: document.getElementById('action-placeholder'),
   imageEditButton: document.getElementById('image-edit-button'),
   actionName: document.getElementById('action-name'),
   actionWeight: document.getElementById('action-weight'),
   flipDirection: document.getElementById('flip-direction'),
+  imageFlipX: document.getElementById('image-flip-x'),
   durationMin: document.getElementById('duration-min'),
   durationMax: document.getElementById('duration-max'),
   movementType: document.getElementById('movement-type'),
@@ -75,12 +89,14 @@ const elements = {
   imageEditorClose: document.getElementById('image-editor-close'),
   imageEditorFrame: document.getElementById('image-editor-preview-frame'),
   imageEditorPreview: document.getElementById('image-editor-preview'),
+  imageEditorClippingStatus: document.getElementById('image-editor-clipping-status'),
   imageScale: document.getElementById('image-scale'),
   imageScaleOutput: document.getElementById('image-scale-output'),
   imageOffsetX: document.getElementById('image-offset-x'),
   imageOffsetXOutput: document.getElementById('image-offset-x-output'),
   imageOffsetY: document.getElementById('image-offset-y'),
   imageOffsetYOutput: document.getElementById('image-offset-y-output'),
+  imageEditorFlipX: document.getElementById('image-editor-flip-x'),
   imageEditorCancel: document.getElementById('image-editor-cancel'),
   imageEditorReset: document.getElementById('image-editor-reset'),
   imageEditorApply: document.getElementById('image-editor-apply'),
@@ -88,9 +104,25 @@ const elements = {
   sizeManagerClose: document.getElementById('size-manager-close'),
   sizeManagerStatus: document.getElementById('size-manager-status'),
   sizeManagerAuto: document.getElementById('size-manager-auto'),
+  sizeManagerFitClipped: document.getElementById('size-manager-fit-clipped'),
   sizeManagerGrid: document.getElementById('size-manager-grid'),
+  sizeManagerMascotSlider: document.getElementById('size-manager-mascot-slider'),
+  sizeManagerMascotOutput: document.getElementById('size-manager-mascot-output'),
+  sizeManagerMascotSize: document.getElementById('size-manager-mascot-size'),
+  sizeManagerScreenPercent: document.getElementById('size-manager-screen-percent'),
+  sizeManagerScreenDiagram: document.getElementById('size-manager-screen-diagram'),
+  sizeManagerScreenDiagramMaximum: document.getElementById('size-manager-screen-diagram-maximum'),
+  sizeManagerScreenDiagramMascot: document.getElementById('size-manager-screen-diagram-mascot'),
+  sizeManagerScreenDiagramCaption: document.getElementById('size-manager-screen-diagram-caption'),
+  sizeManagerMaxMarker: document.getElementById('size-manager-max-marker'),
+  sizeManagerMaxInfo: document.getElementById('size-manager-max-info'),
+  sizeManagerSizeWarning: document.getElementById('size-manager-size-warning'),
+  sizeManagerScaleEffects: document.getElementById('size-manager-scale-effects'),
+  sizeManagerRangeStatus: document.getElementById('size-manager-range-status'),
+  sizeManagerTargetSlider: document.getElementById('size-manager-target-slider'),
+  sizeManagerTargetPercent: document.getElementById('size-manager-target-percent'),
+  sizeManagerTargetOutput: document.getElementById('size-manager-target-output'),
   sizeManagerCancel: document.getElementById('size-manager-cancel'),
-  sizeManagerApply: document.getElementById('size-manager-apply'),
   sizeManagerSave: document.getElementById('size-manager-save'),
   durationBulkDialog: document.getElementById('duration-bulk-dialog'),
   durationBulkMin: document.getElementById('duration-bulk-min'),
@@ -98,7 +130,6 @@ const elements = {
   durationBulkCount: document.getElementById('duration-bulk-count'),
   durationBulkError: document.getElementById('duration-bulk-error'),
   durationBulkCancel: document.getElementById('duration-bulk-cancel'),
-  durationBulkApply: document.getElementById('duration-bulk-apply'),
   durationBulkSave: document.getElementById('duration-bulk-save'),
   jpegDialog: document.getElementById('jpeg-dialog'),
   jpegDialogClose: document.getElementById('jpeg-dialog-close'),
@@ -131,6 +162,10 @@ const state = {
 };
 const actionCardViews = new Map();
 const imagePanBindings = new WeakMap();
+const actionMeasurements = new Map();
+let measurementQueueRunning = false;
+let measurementQueueRequested = false;
+let activeImageEditor = null;
 
 function beginSizeManagerGeneration() {
   state.sizeManagerGeneration += 1;
@@ -170,25 +205,8 @@ const movementLabels = {
   orthogonal: '縦横に動く',
 };
 
-const SETTINGS_RULES = Object.freeze({
-  weight: { minimum: 1, maximum: 10, integer: true },
-  durationMs: { minimum: 500, maximum: 600000, integer: true },
-  mascotSize: { minimum: 32, maximum: 1000 },
-  margin: { minimum: 0, maximum: 1000 },
-  movementSpeed: { minimum: 0, maximum: 2000 },
-  imageScale: { minimum: 0.3, maximum: 3 },
-  imageOffset: { minimum: -100, maximum: 100 },
-  effectIntervalMs: { minimum: 50, maximum: 60000, integer: true },
-  effectSize: { minimum: 4, maximum: 1000 },
-  effectLifetimeMs: { minimum: 50, maximum: 60000, integer: true },
-  effectOffset: { minimum: -5000, maximum: 5000 },
-});
-// Keep in sync with shared/config-rules.js.
-const DEFAULT_DURATION_MS = Object.freeze([6000, 10000]);
-const MAX_ACTIONS = 100;
-const ALLOWED_MOVEMENTS = new Set(['still', 'horizontal', 'wander', 'fall', 'launch', 'orthogonal']);
-const ALLOWED_FLIPS = new Set(['direction', 'none', 'random']);
-const ALLOWED_START_POSITIONS = new Set(['bottom-right', 'bottom-left', 'top-right', 'top-left', 'center']);
+// Keep in sync with renderer.js SAFE_EDGE_INSET and maximumMascotSize().
+const SAFE_EDGE_INSET = 12;
 
 let toastTimer = null;
 
@@ -205,8 +223,22 @@ function numberOr(value, fallback) {
   return Number.isFinite(number) ? number : fallback;
 }
 
+function readNumberInput(value, fallback = Number.NaN) {
+  if (value === undefined || value === null) return fallback;
+  if (typeof value === 'string' && value.trim() === '') return Number.NaN;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : Number.NaN;
+}
+
+function numberInputValue(value, fallback, divisor = 1) {
+  const number = value === undefined || value === null
+    ? fallback
+    : readNumberInput(value);
+  return Number.isFinite(number) ? number / divisor : '';
+}
+
 function secondsToMs(value, fallbackSeconds) {
-  return Math.round(numberOr(value, fallbackSeconds) * 1000);
+  return Math.round(readNumberInput(value, fallbackSeconds) * 1000);
 }
 
 function clamp(value, minimum, maximum) {
@@ -222,15 +254,118 @@ function positiveWeight(value, fallback = 1) {
 function normalizeImageTransform(value) {
   const transform = value && typeof value === 'object' ? value : {};
   return {
+    flipX: transform.flipX === true,
     scale: clamp(numberOr(transform.scale, 1), 0.3, 3),
     offsetX: clamp(numberOr(transform.offsetX, 0), -100, 100),
     offsetY: clamp(numberOr(transform.offsetY, 0), -100, 100),
   };
 }
 
+const CLIPPING_TOLERANCE = 0.005;
+const TIGHT_EDGE_LIMIT = 0.02;
+const FRAME_FIT_LIMIT = 0.92;
+const SAFE_FRAME_MARGIN = TIGHT_EDGE_LIMIT + CLIPPING_TOLERANCE;
+const CLIPPING_EDGE_LABELS = Object.freeze({
+  top: '上',
+  bottom: '下',
+  left: '左',
+  right: '右',
+});
+
+function measurementForTransform(measurement, transformValue) {
+  const transform = normalizeImageTransform(transformValue);
+  return transform.flipX
+    ? { ...measurement, centerX: 1 - measurement.centerX }
+    : measurement;
+}
+
+function visibleContentBounds(measurement, transformValue) {
+  const transform = normalizeImageTransform(transformValue);
+  const adjustedMeasurement = measurementForTransform(measurement, transform);
+  const centerX = 0.5 + transform.offsetX / 100
+    + transform.scale * (adjustedMeasurement.centerX - 0.5);
+  const centerY = 0.5 + transform.offsetY / 100
+    + transform.scale * (adjustedMeasurement.centerY - 0.5);
+  const halfWidth = transform.scale * adjustedMeasurement.baseWidth / 2;
+  const halfHeight = transform.scale * adjustedMeasurement.baseHeight / 2;
+  return {
+    left: centerX - halfWidth,
+    right: centerX + halfWidth,
+    top: centerY - halfHeight,
+    bottom: centerY + halfHeight,
+  };
+}
+
+function computeClipping(measurement, transformValue) {
+  const bounds = visibleContentBounds(measurement, transformValue);
+  const overflow = {
+    top: Math.max(0, -bounds.top),
+    bottom: Math.max(0, bounds.bottom - 1),
+    left: Math.max(0, -bounds.left),
+    right: Math.max(0, bounds.right - 1),
+  };
+  const edges = Object.entries(overflow)
+    .filter(([, amount]) => amount > CLIPPING_TOLERANCE)
+    .map(([edge, amount]) => ({ edge, amount, percent: amount * 100 }));
+  const tight = Object.entries({
+    top: bounds.top >= -CLIPPING_TOLERANCE && bounds.top <= TIGHT_EDGE_LIMIT,
+    bottom: bounds.bottom <= 1 + CLIPPING_TOLERANCE && bounds.bottom >= 1 - TIGHT_EDGE_LIMIT,
+    left: bounds.left >= -CLIPPING_TOLERANCE && bounds.left <= TIGHT_EDGE_LIMIT,
+    right: bounds.right <= 1 + CLIPPING_TOLERANCE && bounds.right >= 1 - TIGHT_EDGE_LIMIT,
+  })
+    .filter(([, isTight]) => isTight)
+    .map(([edge]) => edge);
+  return { clipped: edges.length > 0, edges, tight, overflow, bounds };
+}
+
+function formatClippingStatus(clipping) {
+  const details = clipping.edges.map(({ edge, percent }) => (
+    `${CLIPPING_EDGE_LABELS[edge]}（約 ${Math.max(1, Math.round(percent))}%）`
+  ));
+  if (details.length === 1) {
+    const [detail] = details;
+    return `⚠ ${detail.replace('（', 'が切れています（')}`;
+  }
+  return `⚠ ${details.join('・')}が切れています`;
+}
+
+function formatTightStatus(clipping) {
+  const edges = clipping.tight.map((edge) => CLIPPING_EDGE_LABELS[edge]);
+  return `⚠ ${edges.join('・')}が枠にぎりぎりです`;
+}
+
+function hasFrameIssue(clipping) {
+  return Boolean(clipping && (clipping.clipped || clipping.tight.length > 0));
+}
+
+function fitTransformToFrame(measurement, transformValue) {
+  const transform = normalizeImageTransform(transformValue);
+  const baseSize = Math.max(measurement.baseWidth, measurement.baseHeight);
+  if (baseSize > 0) {
+    transform.scale = clamp(
+      Math.min(transform.scale, FRAME_FIT_LIMIT / baseSize),
+      SETTINGS_RULES.imageScale.minimum,
+      SETTINGS_RULES.imageScale.maximum,
+    );
+  }
+
+  const correctOffset = (offset, start, end) => {
+    let corrected = offset;
+    if (start < SAFE_FRAME_MARGIN) corrected += (SAFE_FRAME_MARGIN - start) * 100;
+    else if (end > 1 - SAFE_FRAME_MARGIN) corrected -= (end - (1 - SAFE_FRAME_MARGIN)) * 100;
+    return clamp(Math.round(corrected * 100) / 100, -100, 100);
+  };
+  let bounds = visibleContentBounds(measurement, transform);
+  transform.offsetX = correctOffset(transform.offsetX, bounds.left, bounds.right);
+  bounds = visibleContentBounds(measurement, transform);
+  transform.offsetY = correctOffset(transform.offsetY, bounds.top, bounds.bottom);
+  return normalizeImageTransform(transform);
+}
+
 function applyImageTransform(imageElement, transformValue) {
   const transform = normalizeImageTransform(transformValue);
-  imageElement.style.transform = `translate(${transform.offsetX}%, ${transform.offsetY}%) scale(${transform.scale})`;
+  const flipX = transform.flipX ? 'scaleX(-1) ' : '';
+  imageElement.style.transform = `translate(${transform.offsetX}%, ${transform.offsetY}%) ${flipX}scale(${transform.scale})`;
 }
 
 function formatImageOffset(value) {
@@ -300,7 +435,6 @@ function disableUnavailableEditor() {
   state.busy = false;
   state.dirty = false;
   state.activeOperation = null;
-  window.mascotAPI?.reportDirtyState?.(false);
   for (const element of Object.values(elements)) {
     if (element && 'disabled' in element) element.disabled = true;
   }
@@ -323,6 +457,7 @@ function setBusy(busy) {
   elements.reloadButton.disabled = busy;
   elements.prepareReleaseButton.disabled = busy;
   elements.addAction.disabled = busy || state.actions.length >= MAX_ACTIONS;
+  elements.actionFitInFrame.disabled = busy;
   elements.openSizeManager.disabled = busy;
   elements.openDurationBulk.disabled = busy || state.actions.length === 0;
   elements.recoveryBackup.disabled = busy || Boolean(elements.recoveryBackup.dataset.unavailable);
@@ -348,7 +483,7 @@ function markDirty() {
   if (!state.apiAvailable) return;
   state.revision += 1;
   state.dirty = true;
-  window.mascotAPI.reportDirtyState?.(true);
+  window.mascotAPI.reportDirtyState(true);
   elements.saveState.textContent = '未保存の変更';
   elements.saveState.classList.add('is-dirty');
   elements.saveState.classList.remove('is-saved');
@@ -359,7 +494,7 @@ function markDirty() {
 
 function markSaved() {
   state.dirty = false;
-  window.mascotAPI.reportDirtyState?.(false);
+  window.mascotAPI.reportDirtyState(false);
   elements.saveState.textContent = '保存済み';
   elements.saveState.classList.remove('is-dirty');
   elements.saveState.classList.add('is-saved');
@@ -370,7 +505,7 @@ function markSaved() {
 
 function markLoaded() {
   state.dirty = false;
-  window.mascotAPI.reportDirtyState?.(false);
+  window.mascotAPI.reportDirtyState(false);
   elements.saveState.textContent = '読み込み済み';
   elements.saveState.classList.remove('is-dirty', 'is-saved');
   elements.feedback.textContent = '設定ファイルを読み込みました。マスコットへの反映状態は未確認です。';
@@ -418,10 +553,9 @@ async function resolveAction(action) {
     effect = { ...action.effect, _assetUrl: effectAssetUrl };
   }
 
-  const legacyFlipMode = action.flipWithDirection === false ? 'none' : 'direction';
   const flipMode = ['direction', 'none', 'random'].includes(action.flipMode)
     ? action.flipMode
-    : legacyFlipMode;
+    : 'direction';
 
   return {
     ...action,
@@ -475,7 +609,7 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
       state.revision = 0;
       renderAll();
       state.dirty = false;
-      window.mascotAPI.reportDirtyState?.(false);
+      window.mascotAPI.reportDirtyState(false);
       elements.saveState.textContent = '復旧が必要';
       elements.saveState.classList.remove('is-dirty', 'is-saved');
       elements.feedback.textContent = '元のファイルは上書きしていません。復旧方法を選んでください。';
@@ -562,13 +696,21 @@ function renderActionList() {
     const weightText = document.createElement('span');
     const weightInput = document.createElement('input');
     const selected = action._uiId === state.selectedId;
+    const clipping = getActionClipping(action, action.imageTransform);
+    const frameIssue = hasFrameIssue(clipping);
+    const warningLabel = clipping?.clipped
+      ? '画像が枠から見切れています'
+      : '画像が枠にぎりぎりです';
+    let warning = null;
 
     card.className = 'action-item-card';
     card.classList.toggle('is-selected', selected);
 
     button.type = 'button';
     button.className = 'action-item-select';
-    button.title = action.name || '名前のない動作';
+    button.title = frameIssue
+      ? warningLabel
+      : action.name || '名前のない動作';
     button.setAttribute('aria-current', selected ? 'true' : 'false');
 
     thumbnail.className = 'action-thumb';
@@ -585,6 +727,14 @@ function renderActionList() {
     copy.className = 'action-copy';
     name.className = 'action-name';
     name.textContent = action.name || '名前のない動作';
+    if (frameIssue) {
+      warning = document.createElement('span');
+      warning.className = 'action-clipping-warning';
+      warning.textContent = ' ⚠';
+      warning.title = warningLabel;
+      warning.setAttribute('aria-label', warningLabel);
+      name.appendChild(warning);
+    }
     meta.className = 'action-meta';
     meta.textContent = movementLabels[action.movement?.type] || '動き未設定';
     copy.append(name, meta);
@@ -604,7 +754,7 @@ function renderActionList() {
     weightInput.max = '10';
     weightInput.step = '1';
     weightInput.inputMode = 'numeric';
-    weightInput.value = String(positiveWeight(action.weight, 1));
+    weightInput.value = numberInputValue(action.weight, 1);
     weightInput.setAttribute('aria-label', `${action.name || 'この動作'}の選ばれやすさ`);
     weightInput.addEventListener('click', (event) => event.stopPropagation());
     weightInput.addEventListener('change', () => {
@@ -618,7 +768,7 @@ function renderActionList() {
     card.append(button, weightLabel);
     item.appendChild(card);
     elements.actionList.appendChild(item);
-    actionCardViews.set(action._uiId, { button, name, weightInput });
+    actionCardViews.set(action._uiId, { button, name, weightInput, warning });
   }
 }
 
@@ -670,12 +820,77 @@ function renderEffectLivePreview() {
   elements.effectLiveImage.title = `横 ${numberOr(effect.offsetX, 0)} px・縦 ${numberOr(effect.offsetY, 12)} px`;
 }
 
+function currentActionMeasurement(action) {
+  const entry = action && actionMeasurements.get(action._uiId);
+  return entry?.key === actionMeasurementKey(action) && entry.status === 'ready'
+    ? entry.measurement
+    : null;
+}
+
+function getActionClipping(action, transform) {
+  const measurement = currentActionMeasurement(action);
+  return measurement ? computeClipping(measurement, transform) : null;
+}
+
+function updateClippingStatus(element, action, transform, { explainClipping = false } = {}) {
+  const entry = action && actionMeasurements.get(action._uiId);
+  if (!action?._assetUrl) {
+    element.textContent = '';
+    element.classList.remove('is-warning');
+    return null;
+  }
+  if (!entry || entry.key !== actionMeasurementKey(action) || entry.status === 'pending') {
+    element.textContent = '測定中…';
+    element.classList.remove('is-warning');
+    return null;
+  }
+  if (entry.status === 'error') {
+    element.textContent = '画像を測定できませんでした。';
+    element.classList.remove('is-warning');
+    return null;
+  }
+  const clipping = computeClipping(entry.measurement, transform);
+  const status = clipping.clipped
+    ? formatClippingStatus(clipping)
+    : clipping.tight.length > 0
+      ? formatTightStatus(clipping)
+      : '見切れなし';
+  element.textContent = `${status}${clipping.clipped && explainClipping ? '。枠からはみ出した部分は、表示されません。' : ''}`;
+  element.classList.toggle('is-warning', hasFrameIssue(clipping));
+  return clipping;
+}
+
+function fitActionIntoFrame(action) {
+  const measurement = currentActionMeasurement(action);
+  if (!measurement) {
+    showError('画像の測定が終わってから、もう一度押してください。');
+    return false;
+  }
+  action.imageTransform = fitTransformToFrame(measurement, action.imageTransform);
+  const clipping = computeClipping(measurement, action.imageTransform);
+  if (hasFrameIssue(clipping)) {
+    showError('画像に十分な余白を作れませんでした。');
+    renderActionList();
+    renderEditor();
+    return false;
+  }
+  markDirty();
+  renderActionList();
+  renderEditor();
+  showToast('枠に収めました。');
+  return true;
+}
+
 function renderEditor() {
   const action = selectedAction();
   const hasAction = Boolean(action);
   elements.emptyState.hidden = hasAction;
   elements.actionEditor.hidden = !hasAction;
-  if (!action) return;
+  if (!action) {
+    elements.actionClippingStatus.textContent = '';
+    elements.actionFitInFrame.hidden = true;
+    return;
+  }
 
   const index = state.actions.findIndex((candidate) => candidate._uiId === action._uiId);
   elements.moveUp.disabled = index <= 0;
@@ -686,13 +901,18 @@ function renderEditor() {
   elements.actionPreviewFrame.hidden = !action._assetUrl;
   applyImageTransform(elements.actionPreview, action.imageTransform);
   elements.imageEditButton.disabled = !action._assetUrl;
+  const clipping = updateClippingStatus(elements.actionClippingStatus, action, action.imageTransform);
+  elements.actionFitInFrame.hidden = !hasFrameIssue(clipping);
+  elements.actionFitInFrame.disabled = state.busy;
+  elements.actionFitInFrame.onclick = () => fitActionIntoFrame(action);
   elements.actionName.value = action.name || '';
-  elements.actionWeight.value = positiveWeight(action.weight, 1);
+  elements.actionWeight.value = numberInputValue(action.weight, 1);
   elements.flipDirection.value = action.flipMode || 'direction';
-  elements.durationMin.value = numberOr(action.durationMs?.[0], DEFAULT_DURATION_MS[0]) / 1000;
-  elements.durationMax.value = numberOr(action.durationMs?.[1], DEFAULT_DURATION_MS[1]) / 1000;
+  elements.imageFlipX.checked = action.imageTransform?.flipX === true;
+  elements.durationMin.value = numberInputValue(action.durationMs?.[0], DEFAULT_DURATION_MS[0], 1000);
+  elements.durationMax.value = numberInputValue(action.durationMs?.[1], DEFAULT_DURATION_MS[1], 1000);
   elements.movementType.value = action.movement?.type || 'still';
-  elements.movementSpeed.value = numberOr(action.movement?.speed, 0);
+  elements.movementSpeed.value = numberInputValue(action.movement?.speed, 0);
   elements.speedOutput.textContent = elements.movementSpeed.value;
   elements.movementSpeed.disabled = elements.movementType.value === 'still';
 
@@ -702,11 +922,11 @@ function renderEditor() {
 
   if (effectEnabled) {
     setImagePreview(elements.effectPreview, elements.effectPlaceholder, action.effect._assetUrl);
-    elements.effectInterval.value = numberOr(action.effect.intervalMs, 450) / 1000;
-    elements.effectSize.value = numberOr(action.effect.size, 32);
-    elements.effectLifetime.value = numberOr(action.effect.lifetimeMs, 1800) / 1000;
-    elements.effectOffsetX.value = numberOr(action.effect.offsetX, 0);
-    elements.effectOffsetY.value = numberOr(action.effect.offsetY, 12);
+    elements.effectInterval.value = numberInputValue(action.effect.intervalMs, 450, 1000);
+    elements.effectSize.value = numberInputValue(action.effect.size, 32);
+    elements.effectLifetime.value = numberInputValue(action.effect.lifetimeMs, 1800, 1000);
+    elements.effectOffsetX.value = numberInputValue(action.effect.offsetX, 0);
+    elements.effectOffsetY.value = numberInputValue(action.effect.offsetY, 12);
     elements.effectWhileStill.checked = Boolean(action.effect.emitWhileStill);
     renderEffectLivePreview();
     requestAnimationFrame(renderEffectLivePreview);
@@ -719,6 +939,7 @@ function renderAll() {
   renderGlobalSettings();
   renderActionList();
   renderEditor();
+  requestVisibleContentMeasurements();
 }
 
 function editSelectedAction(update) {
@@ -740,8 +961,14 @@ function updateActionName() {
     return;
   }
   const displayName = action.name || '名前のない動作';
-  view.button.title = displayName;
+  const clipping = getActionClipping(action, action.imageTransform);
+  const frameIssue = hasFrameIssue(clipping);
+  const warningLabel = clipping?.clipped
+    ? '画像が枠から見切れています'
+    : '画像が枠にぎりぎりです';
+  view.button.title = frameIssue ? warningLabel : displayName;
   view.name.textContent = displayName;
+  if (view.warning && frameIssue) view.name.appendChild(view.warning);
   view.weightInput.setAttribute('aria-label', `${displayName}の選ばれやすさ`);
 }
 
@@ -759,6 +986,7 @@ function addAction() {
     weight: 1,
     durationMs: [...DEFAULT_DURATION_MS],
     flipMode: 'direction',
+    imageTransform: normalizeImageTransform(),
     movement: { type: 'still', speed: 0 },
   };
   state.actions.push(action);
@@ -789,10 +1017,15 @@ function openDurationBulkDialog() {
 function readBulkDuration() {
   elements.durationBulkError.textContent = '';
   elements.durationBulkError.hidden = true;
-  const minimumSeconds = Number(elements.durationBulkMin.value);
-  const maximumSeconds = Number(elements.durationBulkMax.value);
-  if (!Number.isFinite(minimumSeconds) || !Number.isFinite(maximumSeconds)) {
-    elements.durationBulkError.textContent = '最短時間と最長時間に数値を入力してください。';
+  const minimumSeconds = readNumberInput(elements.durationBulkMin.value);
+  const maximumSeconds = readNumberInput(elements.durationBulkMax.value);
+  if (!Number.isFinite(minimumSeconds)) {
+    elements.durationBulkError.textContent = '最短時間を入力してください。';
+    elements.durationBulkError.hidden = false;
+    return null;
+  }
+  if (!Number.isFinite(maximumSeconds)) {
+    elements.durationBulkError.textContent = '最長時間を入力してください。';
     elements.durationBulkError.hidden = false;
     return null;
   }
@@ -819,7 +1052,7 @@ function readBulkDuration() {
   return duration;
 }
 
-async function applyDurationBulk({ save = false } = {}) {
+async function applyDurationBulk() {
   const duration = readBulkDuration();
   if (!duration) return false;
 
@@ -829,9 +1062,7 @@ async function applyDurationBulk({ save = false } = {}) {
   renderActionList();
   renderEditor();
 
-  if (save) return saveConfiguration();
-  showToast('全動作の表示時間を設定しました。');
-  return true;
+  return saveConfiguration();
 }
 
 function deleteSelectedAction() {
@@ -1182,6 +1413,7 @@ function setupDropzone(element, category, onImported) {
 function applyImportedActionImage(result, targetId) {
   const action = state.actions.find((candidate) => candidate._uiId === targetId);
   if (!action) return;
+  actionMeasurements.delete(action._uiId);
   action.file = result.relativePath;
   action._assetUrl = result.assetUrl;
   action.imageTransform = normalizeImageTransform();
@@ -1189,6 +1421,7 @@ function applyImportedActionImage(result, targetId) {
   markDirty();
   renderActionList();
   renderEditor();
+  requestVisibleContentMeasurements();
 }
 
 function applyImportedEffectImage(result, targetId) {
@@ -1214,27 +1447,6 @@ function applyImportedEffectImage(result, targetId) {
 const SIZE_MEASUREMENT_CACHE_TTL_MS = 6000;
 const SIZE_MEASUREMENT_CACHE_LIMIT = 100;
 const sizeMeasurementCache = new Map();
-
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const values = Array.from(items || []);
-  const results = new Array(values.length);
-  const workerCount = Math.min(
-    values.length,
-    Math.max(1, Math.floor(Number(concurrency) || 1)),
-  );
-  let cursor = 0;
-
-  async function worker() {
-    while (cursor < values.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await mapper(values[index], index);
-    }
-  }
-
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
 
 function loadSizeMeasurementImage(source, timeoutMs = SIZE_MEASUREMENT_CACHE_TTL_MS) {
   return new Promise((resolve, reject) => {
@@ -1343,6 +1555,89 @@ async function measureVisibleContent(source, versionKey = source) {
   }
 }
 
+function actionMeasurementKey(action) {
+  return `${action?.file || ''}|${action?._assetUrl || ''}`;
+}
+
+async function getActionMeasurement(action) {
+  const key = actionMeasurementKey(action);
+  const current = actionMeasurements.get(action._uiId);
+  if (current?.key === key) {
+    if (current.status === 'ready') return current.measurement;
+    if (current.promise) return current.promise;
+    if (current.status === 'error') throw current.error;
+  }
+
+  const entry = { key, status: 'pending', measurement: null, error: null, promise: null };
+  actionMeasurements.set(action._uiId, entry);
+  entry.promise = (async () => {
+    const metadata = await window.mascotAPI.getAssetMetadata(action.file);
+    return measureVisibleContent(
+      action._assetUrl,
+      metadata?.cacheKey || `${metadata?.size || 0}:${metadata?.mtimeMs || 0}`,
+    );
+  })();
+  try {
+    const measurement = await entry.promise;
+    if (actionMeasurements.get(action._uiId) === entry) {
+      entry.status = 'ready';
+      entry.measurement = measurement;
+      entry.promise = null;
+    }
+    return measurement;
+  } catch (error) {
+    if (actionMeasurements.get(action._uiId) === entry) {
+      entry.status = 'error';
+      entry.error = error;
+      entry.promise = null;
+    }
+    throw error;
+  }
+}
+
+function requestVisibleContentMeasurements() {
+  if (!state.apiAvailable) return;
+  measurementQueueRequested = true;
+  if (measurementQueueRunning) return;
+  measurementQueueRunning = true;
+
+  void (async () => {
+    while (measurementQueueRequested) {
+      measurementQueueRequested = false;
+      const actionsWithImages = state.actions.filter((action) => action._assetUrl);
+      const activeIds = new Set(actionsWithImages.map((action) => action._uiId));
+      for (const [id, entry] of actionMeasurements) {
+        const action = actionsWithImages.find((candidate) => candidate._uiId === id);
+        if (!activeIds.has(id) || entry.key !== actionMeasurementKey(action)) actionMeasurements.delete(id);
+      }
+      await mapWithConcurrency(actionsWithImages, 4, async (action) => {
+        try {
+          await getActionMeasurement(action);
+        } catch (error) {
+          console.warn(`「${action.name || '画像'}」を測定できませんでした。`, error);
+        }
+      });
+    }
+  })().then(() => {
+    renderActionList();
+    renderEditor();
+    if (activeImageEditor) {
+      const action = state.actions.find((candidate) => candidate._uiId === activeImageEditor.actionId);
+      updateClippingStatus(
+        elements.imageEditorClippingStatus,
+        action,
+        activeImageEditor.transform,
+        { explainClipping: true },
+      );
+    }
+  }).catch((error) => {
+    console.error('画像の見た目を測定できませんでした。', error);
+  }).finally(() => {
+    measurementQueueRunning = false;
+    if (measurementQueueRequested) requestVisibleContentMeasurements();
+  });
+}
+
 function openSizeManager() {
   const actionsWithImages = state.actions.filter((action) => action._assetUrl);
   if (actionsWithImages.length === 0) {
@@ -1350,14 +1645,80 @@ function openSizeManager() {
     return;
   }
   const generation = beginSizeManagerGeneration();
-
   const working = new Map(
     state.actions.map((action) => [action._uiId, normalizeImageTransform(action.imageTransform)]),
   );
   const measurements = new Map();
+  const initialMascotSize = clamp(
+    Math.round(numberOr(state.config?.mascot?.size, 180)),
+    SETTINGS_RULES.mascotSize.minimum,
+    SETTINGS_RULES.mascotSize.maximum,
+  );
+  const screen = window.screen || {};
+  const availableWidth = Math.max(1, Math.round(Number(screen.availWidth) || Number(window.innerWidth) || 1024));
+  const availableHeight = Math.max(1, Math.round(Number(screen.availHeight) || Number(window.innerHeight) || 768));
+  const shortSide = Math.min(availableWidth, availableHeight);
+  const maximumDisplaySize = Math.min(
+    Math.max(1, availableWidth - SAFE_EDGE_INSET * 2),
+    Math.max(1, availableHeight - SAFE_EDGE_INSET * 2),
+  );
+  const effectsAtOpen = new Map(
+    state.actions
+      .filter((action) => action.effect)
+      .map((action) => [action._uiId, {
+        size: numberOr(action.effect.size, 32),
+        offsetX: numberOr(action.effect.offsetX, 0),
+        offsetY: numberOr(action.effect.offsetY, 12),
+      }]),
+  );
   let referenceId = actionsWithImages.some((action) => action._uiId === state.selectedId)
     ? state.selectedId
     : actionsWithImages[0]._uiId;
+  let workingMascotSize = initialMascotSize;
+  let targetSize = null;
+  let alignmentRange = null;
+  const cardMetrics = new Map();
+  const formatDecimal = (value) => String(Number(value.toFixed(1)));
+  const formatPercent = (value) => `${formatDecimal(value)}%`;
+
+  const placeDiagramBox = (box) => {
+    box.style.left = '';
+    box.style.right = '';
+    box.style.top = '';
+    box.style.bottom = '';
+    box.style.transform = '';
+    const position = state.config?.mascot?.startPosition || 'bottom-right';
+    const anchors = {
+      'top-left': { left: '0', top: '0' },
+      'top-right': { right: '0', top: '0' },
+      'bottom-left': { left: '0', bottom: '0' },
+      'bottom-right': { right: '0', bottom: '0' },
+      center: { left: '50%', top: '50%', transform: 'translate(-50%, -50%)' },
+    };
+    Object.assign(box.style, anchors[position] || anchors['bottom-right']);
+  };
+
+  const updateScreenDiagram = () => {
+    const diagramSize = Math.min(workingMascotSize, maximumDisplaySize);
+    const percentage = formatPercent(workingMascotSize / availableHeight * 100);
+    const limitedNote = workingMascotSize > maximumDisplaySize
+      ? ` 画面に収まる表示は${maximumDisplaySize}pxです。`
+      : '';
+    elements.sizeManagerScreenDiagram.style.aspectRatio = `${availableWidth} / ${availableHeight}`;
+    elements.sizeManagerScreenDiagram.setAttribute(
+      'aria-label',
+      `画面の高さの ${percentage} の大きさです。${limitedNote}`,
+    );
+    elements.sizeManagerScreenDiagramCaption.textContent = `画面の高さの ${percentage}`;
+    for (const [box, size] of [
+      [elements.sizeManagerScreenDiagramMaximum, maximumDisplaySize],
+      [elements.sizeManagerScreenDiagramMascot, diagramSize],
+    ]) {
+      box.style.width = `${size / availableWidth * 100}%`;
+      box.style.height = `${size / availableHeight * 100}%`;
+      placeDiagramBox(box);
+    }
+  };
 
   const visualMetric = (action) => {
     const measurement = measurements.get(action._uiId);
@@ -1365,13 +1726,157 @@ function openSizeManager() {
     if (!transform) return '見た目を測定中…';
     const position = `位置：横 ${formatImageOffset(transform.offsetX)}%・縦 ${formatImageOffset(transform.offsetY)}%`;
     if (!measurement) return `見た目を測定中…・${position}`;
-    const width = Math.round(measurement.baseWidth * transform.scale * 100);
-    const height = Math.round(measurement.baseHeight * transform.scale * 100);
-    return `見た目：幅 ${width}% × 高さ ${height}%・${position}`;
+    const adjustedMeasurement = measurementForTransform(measurement, transform);
+    const width = Math.round(adjustedMeasurement.baseWidth * transform.scale * 100);
+    const height = Math.round(adjustedMeasurement.baseHeight * transform.scale * 100);
+    const effectiveMascotSize = Math.min(workingMascotSize, maximumDisplaySize);
+    const actualPixels = Math.round(
+      Math.max(adjustedMeasurement.baseWidth, adjustedMeasurement.baseHeight)
+        * transform.scale * effectiveMascotSize,
+    );
+    return `見た目：幅 ${width}% × 高さ ${height}%・${position}・実際の画面：約 ${actualPixels}px`;
+  };
+
+  const updateCardMetrics = () => {
+    for (const action of state.actions) {
+      const metrics = cardMetrics.get(action._uiId);
+      if (metrics) metrics.textContent = visualMetric(action);
+    }
+  };
+
+  const syncMascotSizeControls = (source = null) => {
+    elements.sizeManagerMascotSlider.value = String(workingMascotSize);
+    elements.sizeManagerMascotOutput.textContent = `${workingMascotSize} px`;
+    if (source !== 'size') elements.sizeManagerMascotSize.value = String(workingMascotSize);
+    if (source !== 'percent') {
+      elements.sizeManagerScreenPercent.value = formatDecimal(workingMascotSize / availableHeight * 100);
+    }
+    elements.sizeManagerSizeWarning.hidden = workingMascotSize <= maximumDisplaySize;
+    elements.sizeManagerSizeWarning.textContent = `画面に収まらないため、${maximumDisplaySize}pxに縮めて表示されます。`;
+    updateScreenDiagram();
+    updateCardMetrics();
+  };
+
+  const setWorkingMascotSize = (value, source = null) => {
+    if (String(value).trim() === '') return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    const pixels = source === 'percent' ? parsed * availableHeight / 100 : parsed;
+    workingMascotSize = clamp(
+      Math.round(pixels),
+      SETTINGS_RULES.mascotSize.minimum,
+      SETTINGS_RULES.mascotSize.maximum,
+    );
+    syncMascotSizeControls(source);
+  };
+
+  const syncTargetControls = (source = null) => {
+    if (!Number.isFinite(targetSize)) return;
+    const value = formatDecimal(targetSize * 100);
+    elements.sizeManagerTargetSlider.value = value;
+    elements.sizeManagerTargetOutput.textContent = `${value}%`;
+    if (source !== 'percent') elements.sizeManagerTargetPercent.value = value;
+  };
+
+  const setTargetSize = (value, source = null) => {
+    if (String(value).trim() === '') return;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    const target = parsed / 100;
+    targetSize = alignmentRange?.valid
+      ? clamp(target, alignmentRange.minimum, alignmentRange.maximum)
+      : clamp(target, 0, FRAME_FIT_LIMIT);
+    syncTargetControls(source);
+  };
+
+  const updateTargetFromReference = () => {
+    const measurement = measurements.get(referenceId);
+    const transform = working.get(referenceId);
+    if (!measurement || !transform) return;
+    const referenceSize = Math.max(measurement.baseWidth, measurement.baseHeight) * transform.scale;
+    targetSize = alignmentRange?.valid
+      ? clamp(referenceSize, alignmentRange.minimum, alignmentRange.maximum)
+      : clamp(referenceSize, 0, FRAME_FIT_LIMIT);
+    syncTargetControls();
+  };
+
+  const calculateAlignmentRange = () => {
+    const measured = actionsWithImages
+      .map((action) => ({
+        action,
+        baseSize: Math.max(
+          measurements.get(action._uiId)?.baseWidth || 0,
+          measurements.get(action._uiId)?.baseHeight || 0,
+        ),
+      }))
+      .filter((entry) => entry.baseSize > 0);
+    if (measured.length === 0) return null;
+
+    const lower = measured.reduce((current, entry) => (
+      entry.baseSize * SETTINGS_RULES.imageScale.minimum > current.baseSize * SETTINGS_RULES.imageScale.minimum
+        ? entry
+        : current
+    ));
+    const upper = measured.reduce((current, entry) => (
+      entry.baseSize * SETTINGS_RULES.imageScale.maximum < current.baseSize * SETTINGS_RULES.imageScale.maximum
+        ? entry
+        : current
+    ));
+    const minimum = lower.baseSize * SETTINGS_RULES.imageScale.minimum;
+    const upperByImage = upper.baseSize * SETTINGS_RULES.imageScale.maximum;
+    const rawMaximum = Math.min(FRAME_FIT_LIMIT, upperByImage);
+    const valid = minimum <= rawMaximum + 1e-9;
+    return {
+      minimum,
+      maximum: valid ? Math.max(minimum, rawMaximum) : rawMaximum,
+      valid,
+      lowerAction: lower.action,
+      upperAction: upperByImage < FRAME_FIT_LIMIT ? upper.action : null,
+    };
+  };
+
+  const renderAlignmentRange = () => {
+    if (!alignmentRange) {
+      elements.sizeManagerRangeStatus.textContent = '画像の見た目を測定できませんでした。';
+      elements.sizeManagerTargetSlider.disabled = true;
+      elements.sizeManagerTargetPercent.disabled = true;
+      elements.sizeManagerAuto.disabled = !measurements.has(referenceId);
+      return;
+    }
+
+    const rangeText = `揃えられる範囲：${formatDecimal(alignmentRange.minimum * 100)}〜${formatDecimal(alignmentRange.maximum * 100)}%`;
+    const lowerName = alignmentRange.lowerAction.name || '名前のない画像';
+    const upperReason = alignmentRange.upperAction
+      ? `「${alignmentRange.upperAction.name || '名前のない画像'}」の上限`
+      : `枠に収める上限（${formatPercent(FRAME_FIT_LIMIT * 100)}%）`;
+    elements.sizeManagerRangeStatus.textContent = alignmentRange.valid
+      ? rangeText
+      : `${rangeText}。範囲が成立しません：「${lowerName}」の下限が${upperReason}を超えています。`;
+    elements.sizeManagerRangeStatus.classList.toggle('is-error', !alignmentRange.valid);
+    elements.sizeManagerTargetSlider.disabled = !alignmentRange.valid;
+    elements.sizeManagerTargetPercent.disabled = !alignmentRange.valid;
+    if (alignmentRange.valid) {
+      const minimum = formatDecimal(alignmentRange.minimum * 100);
+      const maximum = formatDecimal(alignmentRange.maximum * 100);
+      elements.sizeManagerTargetSlider.min = minimum;
+      elements.sizeManagerTargetSlider.max = maximum;
+      elements.sizeManagerTargetPercent.min = minimum;
+      elements.sizeManagerTargetPercent.max = maximum;
+    }
+    updateTargetFromReference();
+    elements.sizeManagerAuto.disabled = !measurements.has(referenceId);
+  };
+
+  const updateFitClippedButton = () => {
+    elements.sizeManagerFitClipped.disabled = !actionsWithImages.some((action) => (
+      measurements.has(action._uiId)
+      && hasFrameIssue(computeClipping(measurements.get(action._uiId), working.get(action._uiId)))
+    ));
   };
 
   const renderCards = () => {
     elements.sizeManagerGrid.replaceChildren();
+    cardMetrics.clear();
 
     for (const action of state.actions) {
       const card = document.createElement('article');
@@ -1385,6 +1890,7 @@ function openSizeManager() {
       const controlOutput = document.createElement('output');
       const slider = document.createElement('input');
       const metrics = document.createElement('p');
+      const clippingWarning = document.createElement('p');
       const transform = working.get(action._uiId);
 
       card.className = 'size-card';
@@ -1398,6 +1904,7 @@ function openSizeManager() {
       radio.addEventListener('change', () => {
         referenceId = action._uiId;
         elements.sizeManagerStatus.textContent = `「${action.name || '画像'}」を基準に選びました。`;
+        updateTargetFromReference();
         renderCards();
       });
       title.className = 'size-card-title';
@@ -1415,6 +1922,8 @@ function openSizeManager() {
         attachImagePan(preview, transform, () => {
           applyImageTransform(image, transform);
           metrics.textContent = visualMetric(action);
+          updateClippingWarning();
+          updateFitClippedButton();
         });
       } else {
         preview.textContent = '画像未登録';
@@ -1430,19 +1939,33 @@ function openSizeManager() {
       slider.step = '0.01';
       slider.value = String(transform.scale);
       slider.disabled = !action._assetUrl;
+      clippingWarning.className = 'size-card-clipping-warning';
+      clippingWarning.textContent = '⚠';
+      clippingWarning.hidden = true;
+      const updateClippingWarning = () => {
+        const measurement = measurements.get(action._uiId);
+        const clipping = measurement ? computeClipping(measurement, transform) : null;
+        clippingWarning.hidden = !hasFrameIssue(clipping);
+        clippingWarning.textContent = clipping?.clipped ? '⚠ 見切れ' : '⚠ ぎりぎり';
+      };
       metrics.className = 'size-card-metrics';
       metrics.textContent = visualMetric(action);
+      cardMetrics.set(action._uiId, metrics);
       slider.addEventListener('input', () => {
         transform.scale = clamp(numberOr(slider.value, 1), 0.3, 3);
         controlOutput.textContent = `${Math.round(transform.scale * 100)}%`;
         const image = preview.querySelector('img');
         if (image) applyImageTransform(image, transform);
         metrics.textContent = visualMetric(action);
+        updateClippingWarning();
+        updateFitClippedButton();
       });
       controls.append(controlLabel, slider, metrics);
-      card.append(header, preview, controls);
+      card.append(header, preview, controls, clippingWarning);
       elements.sizeManagerGrid.appendChild(card);
+      updateClippingWarning();
     }
+    updateFitClippedButton();
   };
 
   const closeDialog = () => {
@@ -1450,19 +1973,46 @@ function openSizeManager() {
     if (elements.sizeManagerDialog.open) elements.sizeManagerDialog.close();
   };
 
+  elements.sizeManagerMaxInfo.textContent = `最大 ${maximumDisplaySize}px`;
+  elements.sizeManagerMaxMarker.style.left = `${clamp(
+    (maximumDisplaySize - SETTINGS_RULES.mascotSize.minimum)
+      / (SETTINGS_RULES.mascotSize.maximum - SETTINGS_RULES.mascotSize.minimum) * 100,
+    0,
+    100,
+  )}%`;
+  elements.sizeManagerScaleEffects.checked = true;
+  elements.sizeManagerMascotSlider.oninput = () => setWorkingMascotSize(elements.sizeManagerMascotSlider.value, 'slider');
+  elements.sizeManagerMascotSize.oninput = () => setWorkingMascotSize(elements.sizeManagerMascotSize.value, 'size');
+  elements.sizeManagerMascotSize.onchange = () => {
+    setWorkingMascotSize(elements.sizeManagerMascotSize.value, 'size');
+    elements.sizeManagerMascotSize.value = String(workingMascotSize);
+  };
+  elements.sizeManagerScreenPercent.oninput = () => setWorkingMascotSize(elements.sizeManagerScreenPercent.value, 'percent');
+  elements.sizeManagerScreenPercent.onchange = () => {
+    setWorkingMascotSize(elements.sizeManagerScreenPercent.value, 'percent');
+    elements.sizeManagerScreenPercent.value = formatDecimal(workingMascotSize / availableHeight * 100);
+  };
+  elements.sizeManagerTargetSlider.oninput = () => setTargetSize(elements.sizeManagerTargetSlider.value, 'slider');
+  elements.sizeManagerTargetPercent.oninput = () => setTargetSize(elements.sizeManagerTargetPercent.value, 'percent');
+  elements.sizeManagerTargetPercent.onchange = () => {
+    setTargetSize(elements.sizeManagerTargetPercent.value, 'percent');
+    elements.sizeManagerTargetPercent.value = formatDecimal(targetSize * 100);
+  };
+  syncMascotSizeControls();
   elements.sizeManagerAuto.disabled = true;
-  elements.sizeManagerStatus.textContent = '透明部分を除いた見た目を測定しています…';
+  elements.sizeManagerFitClipped.disabled = true;
+  elements.sizeManagerStatus.textContent = '測定中…';
+  elements.sizeManagerRangeStatus.textContent = '測定中…';
+  elements.sizeManagerRangeStatus.classList.remove('is-error');
+  elements.sizeManagerTargetSlider.disabled = true;
+  elements.sizeManagerTargetPercent.disabled = true;
+  targetSize = null;
   renderCards();
   elements.sizeManagerDialog.showModal();
 
   mapWithConcurrency(actionsWithImages, 4, async (action) => {
     try {
-      const metadata = await window.mascotAPI.getAssetMetadata(action.file);
-      if (!isSizeManagerGenerationCurrent(generation)) return;
-      const measurement = await measureVisibleContent(
-        action._assetUrl,
-        metadata?.cacheKey || `${metadata?.size || 0}:${metadata?.mtimeMs || 0}`,
-      );
+      const measurement = await getActionMeasurement(action);
       if (!isSizeManagerGenerationCurrent(generation)) return;
       measurements.set(action._uiId, measurement);
     } catch (error) {
@@ -1470,8 +2020,9 @@ function openSizeManager() {
     }
   }).then(() => {
     if (!isSizeManagerGenerationCurrent(generation) || !elements.sizeManagerDialog.open) return;
-    elements.sizeManagerAuto.disabled = !measurements.has(referenceId);
-    elements.sizeManagerStatus.textContent = `${measurements.size}枚を測定しました。基準画像を選べます。`;
+    elements.sizeManagerStatus.textContent = `${measurements.size} 枚を測定しました。`;
+    alignmentRange = calculateAlignmentRange();
+    renderAlignmentRange();
     renderCards();
   });
 
@@ -1485,21 +2036,39 @@ function openSizeManager() {
       return;
     }
 
-    const targetSize = Math.max(referenceMeasurement.baseWidth, referenceMeasurement.baseHeight)
-      * referenceTransform.scale;
+    const target = clamp(Number.isFinite(targetSize)
+      ? targetSize
+      : Math.max(referenceMeasurement.baseWidth, referenceMeasurement.baseHeight) * referenceTransform.scale,
+    0,
+    FRAME_FIT_LIMIT);
     for (const action of actionsWithImages) {
-      if (action._uiId === referenceId) continue;
       const measurement = measurements.get(action._uiId);
       if (!measurement) continue;
       const current = working.get(action._uiId);
       const baseSize = Math.max(measurement.baseWidth, measurement.baseHeight);
-      const scale = clamp(targetSize / Math.max(0.001, baseSize), 0.3, 3);
+      const scale = clamp(target / Math.max(0.001, baseSize), 0.3, 3);
       current.scale = scale;
-      current.offsetX = clamp(-100 * scale * (measurement.centerX - 0.5), -100, 100);
-      current.offsetY = clamp(-100 * scale * (measurement.centerY - 0.5), -100, 100);
+      const adjustedMeasurement = measurementForTransform(measurement, current);
+      current.offsetX = clamp(-100 * scale * (adjustedMeasurement.centerX - 0.5), -100, 100);
+      current.offsetY = clamp(-100 * scale * (adjustedMeasurement.centerY - 0.5), -100, 100);
+      Object.assign(current, fitTransformToFrame(measurement, current));
     }
-    elements.sizeManagerStatus.textContent = `「${referenceAction.name || '画像'}」の見た目の大きさに揃えました。`;
+    elements.sizeManagerStatus.textContent = `見た目の大きさを${formatPercent(target * 100)}に、できる範囲で揃えました。`;
     renderCards();
+  };
+
+  elements.sizeManagerFitClipped.onclick = () => {
+    if (!isSizeManagerGenerationCurrent(generation)) return;
+    let fixedCount = 0;
+    for (const action of actionsWithImages) {
+      const measurement = measurements.get(action._uiId);
+      const transform = working.get(action._uiId);
+      if (!measurement || !hasFrameIssue(computeClipping(measurement, transform))) continue;
+      working.set(action._uiId, fitTransformToFrame(measurement, transform));
+      fixedCount += 1;
+    }
+    renderCards();
+    elements.sizeManagerStatus.textContent = `${fixedCount} 枚の画像を枠に収めました。`;
   };
 
   elements.sizeManagerCancel.onclick = closeDialog;
@@ -1508,23 +2077,37 @@ function openSizeManager() {
     event.preventDefault();
     closeDialog();
   };
-  const applyWorkingTransforms = () => {
+  const applyWorkingSettings = () => {
+    state.config.mascot.size = workingMascotSize;
+    const scaleEffects = elements.sizeManagerScaleEffects.checked;
+    const effectRatio = workingMascotSize / initialMascotSize;
     for (const action of state.actions) {
       action.imageTransform = normalizeImageTransform(working.get(action._uiId));
+      const originalEffect = effectsAtOpen.get(action._uiId);
+      if (!scaleEffects || !originalEffect || !action.effect) continue;
+      action.effect.size = clamp(
+        Math.round(originalEffect.size * effectRatio),
+        SETTINGS_RULES.effectSize.minimum,
+        SETTINGS_RULES.effectSize.maximum,
+      );
+      action.effect.offsetX = clamp(
+        Math.round(originalEffect.offsetX * effectRatio),
+        SETTINGS_RULES.effectOffset.minimum,
+        SETTINGS_RULES.effectOffset.maximum,
+      );
+      action.effect.offsetY = clamp(
+        Math.round(originalEffect.offsetY * effectRatio),
+        SETTINGS_RULES.effectOffset.minimum,
+        SETTINGS_RULES.effectOffset.maximum,
+      );
     }
     markDirty();
     closeDialog();
-    renderActionList();
-    renderEditor();
-  };
-  elements.sizeManagerApply.onclick = () => {
-    if (!isSizeManagerGenerationCurrent(generation)) return;
-    applyWorkingTransforms();
-    showToast('全画像の表示サイズを反映しました。');
+    renderAll();
   };
   elements.sizeManagerSave.onclick = async () => {
     if (!isSizeManagerGenerationCurrent(generation)) return;
-    applyWorkingTransforms();
+    applyWorkingSettings();
     await saveConfiguration();
   };
 }
@@ -1537,9 +2120,11 @@ function openImageEditor() {
   }
 
   const working = normalizeImageTransform(action.imageTransform);
+  activeImageEditor = { actionId: action._uiId, transform: working };
   elements.imageEditorPreview.src = action._assetUrl;
 
   const updatePreview = () => {
+    working.flipX = elements.imageEditorFlipX.checked;
     working.scale = clamp(numberOr(elements.imageScale.value, 1), 0.3, 3);
     working.offsetX = clamp(numberOr(elements.imageOffsetX.value, 0), -100, 100);
     working.offsetY = clamp(numberOr(elements.imageOffsetY.value, 0), -100, 100);
@@ -1547,9 +2132,16 @@ function openImageEditor() {
     elements.imageOffsetXOutput.textContent = formatImageOffset(working.offsetX);
     elements.imageOffsetYOutput.textContent = formatImageOffset(working.offsetY);
     applyImageTransform(elements.imageEditorPreview, working);
+    updateClippingStatus(
+      elements.imageEditorClippingStatus,
+      action,
+      working,
+      { explainClipping: true },
+    );
   };
 
   const setControls = (transform) => {
+    elements.imageEditorFlipX.checked = transform.flipX;
     elements.imageScale.value = String(transform.scale);
     elements.imageOffsetX.value = String(transform.offsetX);
     elements.imageOffsetY.value = String(transform.offsetY);
@@ -1557,12 +2149,14 @@ function openImageEditor() {
   };
 
   const closeDialog = () => {
+    if (activeImageEditor?.actionId === action._uiId) activeImageEditor = null;
     if (elements.imageEditorDialog.open) elements.imageEditorDialog.close();
   };
 
   elements.imageScale.oninput = updatePreview;
   elements.imageOffsetX.oninput = updatePreview;
   elements.imageOffsetY.oninput = updatePreview;
+  elements.imageEditorFlipX.onchange = updatePreview;
   elements.imageEditorReset.onclick = () => setControls(normalizeImageTransform());
   elements.imageEditorCancel.onclick = closeDialog;
   elements.imageEditorClose.onclick = closeDialog;
@@ -1589,10 +2183,10 @@ function openImageEditor() {
 }
 
 function assertEditableNumber(value, fallback, label, rule) {
-  const number = value === undefined ? fallback : Number(value);
+  const number = readNumberInput(value, fallback);
+  if (!Number.isFinite(number)) throw new Error(`${label}を入力してください。`);
   if (
-    !Number.isFinite(number)
-    || number < rule.minimum
+    number < rule.minimum
     || number > rule.maximum
     || (rule.integer && !Number.isInteger(number))
   ) {
@@ -1616,13 +2210,13 @@ function validateEditableStateForSave() {
     assertEditableNumber(action.weight, 1, `${label}の選ばれやすさ`, SETTINGS_RULES.weight);
     const duration = Array.isArray(action.durationMs) ? action.durationMs : DEFAULT_DURATION_MS;
     const minimum = assertEditableNumber(
-      Math.round(numberOr(duration[0], DEFAULT_DURATION_MS[0])),
+      Math.round(readNumberInput(duration[0], DEFAULT_DURATION_MS[0])),
       DEFAULT_DURATION_MS[0],
       `${label}の最短時間`,
       SETTINGS_RULES.durationMs,
     );
     const maximum = assertEditableNumber(
-      Math.round(numberOr(duration[1], DEFAULT_DURATION_MS[1])),
+      Math.round(readNumberInput(duration[1], DEFAULT_DURATION_MS[1])),
       DEFAULT_DURATION_MS[1],
       `${label}の最長時間`,
       SETTINGS_RULES.durationMs,
@@ -1630,6 +2224,9 @@ function validateEditableStateForSave() {
     if (minimum > maximum) throw new Error(`${label}の最短時間は最長時間以下にしてください。`);
     if (!ALLOWED_FLIPS.has(action.flipMode || 'direction')) throw new Error(`${label}の反転設定が対応していません。`);
     const transform = action.imageTransform || {};
+    if (transform.flipX !== undefined && typeof transform.flipX !== 'boolean') {
+      throw new Error(`${label}の画像反転設定はtrueまたはfalseにしてください。`);
+    }
     assertEditableNumber(transform.scale, 1, `${label}の画像倍率`, SETTINGS_RULES.imageScale);
     assertEditableNumber(transform.offsetX, 0, `${label}の画像横位置`, SETTINGS_RULES.imageOffset);
     assertEditableNumber(transform.offsetY, 0, `${label}の画像縦位置`, SETTINGS_RULES.imageOffset);
@@ -1638,14 +2235,14 @@ function validateEditableStateForSave() {
     assertEditableNumber(movement.speed, 0, `${label}の速さ`, SETTINGS_RULES.movementSpeed);
     if (action.effect) {
       assertEditableNumber(
-        Math.round(numberOr(action.effect.intervalMs, 450)),
+        Math.round(readNumberInput(action.effect.intervalMs, 450)),
         450,
         `${label}のエフェクト間隔`,
         SETTINGS_RULES.effectIntervalMs,
       );
       assertEditableNumber(action.effect.size, 32, `${label}のエフェクトサイズ`, SETTINGS_RULES.effectSize);
       assertEditableNumber(
-        Math.round(numberOr(action.effect.lifetimeMs, 1800)),
+        Math.round(readNumberInput(action.effect.lifetimeMs, 1800)),
         1800,
         `${label}のエフェクト表示時間`,
         SETTINGS_RULES.effectLifetimeMs,
@@ -1743,6 +2340,7 @@ function applyNormalizedConfigToState(config) {
 
     return {
       ...action,
+      imageTransform: normalizeImageTransform(action.imageTransform),
       _uiId: previous?._uiId || newId(),
       _assetUrl: assetUrl,
       movement: { type: 'still', speed: 0, ...(action.movement || {}) },
@@ -1756,7 +2354,7 @@ function applyNormalizedConfigToState(config) {
 
 function markApplyRetry(message) {
   state.dirty = true;
-  window.mascotAPI.reportDirtyState?.(true);
+  window.mascotAPI.reportDirtyState(true);
   elements.saveState.textContent = '保存済み・反映を再試行';
   elements.saveState.classList.add('is-dirty');
   elements.saveState.classList.remove('is-saved');
@@ -1767,7 +2365,7 @@ function markApplyRetry(message) {
 
 function markNewerChangesPending() {
   state.dirty = true;
-  window.mascotAPI.reportDirtyState?.(true);
+  window.mascotAPI.reportDirtyState(true);
   elements.saveState.textContent = '新しい変更あり';
   elements.saveState.classList.add('is-dirty');
   elements.saveState.classList.remove('is-saved');
@@ -1827,10 +2425,10 @@ async function prepareDistributionDefaults() {
     disableUnavailableEditor();
     return false;
   }
-  if (state.isPackaged) return;
+  if (state.isPackaged) return false;
   if (state.dirty) {
     const saved = await saveConfiguration();
-    if (!saved) return;
+    if (!saved) return false;
   }
 
   const operation = beginOperation('prepare-distribution');
@@ -1842,9 +2440,11 @@ async function prepareDistributionDefaults() {
     }
     showToast('現在の画像と設定を、配布版の初期状態へ反映しました。');
     elements.feedback.textContent = '配布版へ反映済みです。次はアプリをビルドできます。';
+    return true;
   } catch (error) {
     console.error(error);
     showError(readableError(error));
+    return false;
   } finally {
     endOperation(operation);
   }
@@ -1880,14 +2480,22 @@ elements.moveDown.addEventListener('click', () => moveSelectedAction(1));
 elements.actionName.addEventListener('input', updateActionName);
 elements.actionWeight.addEventListener('change', () => {
   editSelectedAction((action) => {
-    action.weight = positiveWeight(elements.actionWeight.value, 1);
-    elements.actionWeight.value = String(action.weight);
+    action.weight = readNumberInput(elements.actionWeight.value);
+    if (Number.isFinite(action.weight)) elements.actionWeight.value = String(action.weight);
   });
   renderActionList();
 });
 elements.flipDirection.addEventListener('change', () => editSelectedAction((action) => {
   action.flipMode = elements.flipDirection.value;
 }));
+elements.imageFlipX.addEventListener('change', () => {
+  editSelectedAction((action) => {
+    action.imageTransform = normalizeImageTransform(action.imageTransform);
+    action.imageTransform.flipX = elements.imageFlipX.checked;
+  });
+  renderActionList();
+  renderEditor();
+});
 elements.durationMin.addEventListener('input', () => editSelectedAction((action) => {
   action.durationMs[0] = secondsToMs(elements.durationMin.value, DEFAULT_DURATION_MS[0] / 1000);
 }));
@@ -1905,7 +2513,7 @@ elements.movementType.addEventListener('change', () => {
 });
 elements.movementSpeed.addEventListener('input', () => {
   editSelectedAction((action) => {
-    action.movement.speed = numberOr(elements.movementSpeed.value, 0);
+    action.movement.speed = readNumberInput(elements.movementSpeed.value);
   });
   elements.speedOutput.textContent = elements.movementSpeed.value;
 });
@@ -1938,7 +2546,7 @@ elements.effectInterval.addEventListener('input', () => {
 });
 elements.effectSize.addEventListener('input', () => {
   editSelectedAction((action) => {
-    action.effect.size = numberOr(elements.effectSize.value, 32);
+    action.effect.size = readNumberInput(elements.effectSize.value);
   });
   renderEffectLivePreview();
 });
@@ -1950,13 +2558,13 @@ elements.effectLifetime.addEventListener('input', () => {
 });
 elements.effectOffsetX.addEventListener('input', () => {
   editSelectedAction((action) => {
-    action.effect.offsetX = numberOr(elements.effectOffsetX.value, 0);
+    action.effect.offsetX = readNumberInput(elements.effectOffsetX.value);
   });
   renderEffectLivePreview();
 });
 elements.effectOffsetY.addEventListener('input', () => {
   editSelectedAction((action) => {
-    action.effect.offsetY = numberOr(elements.effectOffsetY.value, 12);
+    action.effect.offsetY = readNumberInput(elements.effectOffsetY.value);
   });
   renderEffectLivePreview();
 });
@@ -1967,8 +2575,7 @@ elements.effectWhileStill.addEventListener('change', () => editSelectedAction((a
 elements.openSizeManager.addEventListener('click', openSizeManager);
 elements.openDurationBulk.addEventListener('click', openDurationBulkDialog);
 elements.durationBulkCancel.addEventListener('click', () => elements.durationBulkDialog.close());
-elements.durationBulkApply.addEventListener('click', () => applyDurationBulk());
-elements.durationBulkSave.addEventListener('click', () => applyDurationBulk({ save: true }));
+elements.durationBulkSave.addEventListener('click', () => applyDurationBulk());
 elements.imageEditButton.addEventListener('click', openImageEditor);
 setupDropzone(elements.actionDropzone, 'actions', applyImportedActionImage);
 setupDropzone(elements.effectDropzone, 'effects', applyImportedEffectImage);

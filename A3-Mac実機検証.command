@@ -86,7 +86,11 @@ if [ "$VALIDATION_OK" -eq 1 ]; then
 fi
 
 if [ "$VALIDATION_OK" -eq 1 ]; then
-  cd "$WORK_SOURCE" || record_failure "一時コピーへ移動"
+  if ! cd "$WORK_SOURCE"; then
+    echo "一時コピーへ移動できないため、以降の処理を中止します。"
+    record_failure "一時コピーへ移動"
+    pause_and_exit 1
+  fi
   if run_logged "03-dependency-candidate.log" npm install --package-lock-only --ignore-scripts --save-dev --save-exact electron@latest electron-builder@latest; then
     cp package.json "$RESULT_DIR/candidate-package.json"
     cp package-lock.json "$RESULT_DIR/candidate-package-lock.json"

@@ -143,6 +143,118 @@ test('B-04: a mismatched renderer hash cannot be reported as applied', async () 
   });
 });
 
+test('B-13: save retries once when a tray reload supersedes its apply', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot, userCharacters }) => {
+    const main = loadMainForTest({ projectRoot, userDataRoot });
+    const config = readJson(path.join(userCharacters, 'config.json'));
+    const normalizedConfig = main.api.validateAndNormalizeConfig(config);
+    const configHash = main.api.hashNormalizedConfig(normalizedConfig);
+    let loadCount = 0;
+    let releaseFirstLoad;
+    let applyAttempts = 0;
+    let trayReloadResult = null;
+    let supersededApplyResult = null;
+    let simulationError = null;
+    let mascotEvent;
+
+    class LoadedImage {
+      constructor() {
+        this.naturalWidth = 1;
+        this.naturalHeight = 1;
+      }
+
+      set src(value) {
+        this.source = value;
+        queueMicrotask(() => this.onload?.());
+      }
+    }
+
+    const renderer = loadRendererForTest({
+      projectRoot,
+      ImageClass: LoadedImage,
+      mascotAPI: {
+        async loadConfig() {
+          loadCount += 1;
+          if (loadCount === 1) {
+            return new Promise((resolve) => {
+              releaseFirstLoad = resolve;
+            });
+          }
+          return { config, configHash };
+        },
+        async resolveAsset() {
+          return 'file:///test/rest.svg';
+        },
+      },
+    });
+    const mascotImage = renderer.nodes.get('mascot-image');
+    let mascotImageSource = '';
+    Object.defineProperty(mascotImage, 'src', {
+      get() { return mascotImageSource; },
+      set(value) {
+        mascotImageSource = value;
+        queueMicrotask(() => mascotImage.dispatchEvent({ type: 'load' }));
+      },
+    });
+
+    mascotEvent = installTrustedWindow(main, projectRoot, 'mascot', {
+      id: 513,
+      send(channel, payload) {
+        if (channel !== 'mascot:command' || payload?.command !== 'reload-config') return;
+        applyAttempts += 1;
+
+        const reportResult = (result) => main.ipcListeners.get('mascot:apply-result')(
+          mascotEvent,
+          { requestId: payload.value.requestId, ...result },
+        );
+
+        if (applyAttempts === 1) {
+          const saveReload = renderer.api.reloadConfig({
+            keepPosition: true,
+            preferredActionIndex: payload.value.previewActionIndex,
+            expectedConfigHash: payload.value.configHash,
+          });
+          const trayReload = renderer.api.reloadConfig({ keepPosition: true });
+
+          void (async () => {
+            try {
+              trayReloadResult = await trayReload;
+              releaseFirstLoad({ config, configHash });
+              supersededApplyResult = await saveReload;
+              reportResult(supersededApplyResult);
+            } catch (error) {
+              simulationError = error;
+              reportResult({ ok: false, error: error.message });
+            }
+          })();
+          return;
+        }
+
+        void renderer.api.reloadConfig({
+          keepPosition: true,
+          preferredActionIndex: payload.value.previewActionIndex,
+          expectedConfigHash: payload.value.configHash,
+        }).then(reportResult, (error) => {
+          simulationError = error;
+          reportResult({ ok: false, error: error.message });
+        });
+      },
+    });
+    const settingsEvent = installTrustedWindow(main, projectRoot, 'settings');
+    const result = await main.handlers.get('mascot:save-config')(
+      settingsEvent,
+      { config, previewActionIndex: 0 },
+    );
+
+    assert.equal(simulationError, null);
+    assert.equal(trayReloadResult?.ok, true);
+    assert.equal(supersededApplyResult?.superseded, true);
+    assert.equal(applyAttempts, 2);
+    assert.equal(result.applied, true);
+    assert.equal(result.appliedHash, result.savedHash);
+  });
+});
+
 test('B-05: renderer creation re-sends the paused state after did-finish-load', async () => {
   await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
     const main = loadMainForTest({ projectRoot, userDataRoot });

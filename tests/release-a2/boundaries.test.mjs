@@ -188,6 +188,7 @@ test('A2-11: mascot preload exists and exposes only runtime capabilities', async
       'loadConfig',
       'onCommand',
       'reportApplyResult',
+      'reportDiagnostic',
       'resolveAsset',
       'setMousePassthrough',
     ]);

@@ -22,7 +22,7 @@
   "version": "1.0.0",
   "author": "あなたの名前",
   "build": {
-    "appId": "com.example.desktopmascot",
+    "appId": "com.github.onoayami.desktopmascot",
     "productName": "あなたのアプリ名"
   }
 }
@@ -91,6 +91,7 @@ Desktop Mascot-1.0.0-universal.zip
 ```
 
 通常は **`.dmg` を利用者へ配布**します。ソースコードのZIPではありません。
+ソースZIPの作成にはPython 3の`python3`コマンドが必要です。
 
 ## 5. 配布方法は2段階あります
 

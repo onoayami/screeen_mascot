@@ -114,9 +114,34 @@ def git_tracked_files(root: Path) -> set[str] | None:
         message = result.stderr.decode("utf-8", errors="replace").strip()
         raise ValueError(f"Git追跡ファイルを確認できません：{message}")
     try:
-        return {value for value in result.stdout.decode("utf-8").split("\0") if value}
+        tracked = {value for value in result.stdout.decode("utf-8").split("\0") if value}
     except UnicodeDecodeError as error:
         raise ValueError(f"Git追跡ファイル名がUTF-8ではありません：{error}") from error
+
+    untracked_result = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if untracked_result.returncode != 0:
+        message = untracked_result.stderr.decode("utf-8", errors="replace").strip()
+        raise ValueError(f"Git未追跡ファイルを確認できません：{message}")
+    try:
+        untracked = [
+            value for value in untracked_result.stdout.decode("utf-8").split("\0") if value
+        ]
+    except UnicodeDecodeError as error:
+        raise ValueError(f"Git未追跡ファイル名がUTF-8ではありません：{error}") from error
+    if untracked:
+        listing = "\n".join(f"- {value}" for value in untracked)
+        raise ValueError(
+            "未追跡ファイルがあるため、ソースZIPを中止しました。"
+            "必要なファイルをGitで追跡するか、不要なファイルを除外してください：\n"
+            f"{listing}"
+        )
+    return tracked
 
 
 def fallback_source_files(root: Path) -> set[str]:

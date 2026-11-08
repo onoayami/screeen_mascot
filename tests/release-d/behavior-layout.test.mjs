@@ -3,13 +3,21 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { chromium } from 'playwright';
 import {
   loadMainForTest,
   loadRendererForTest,
   loadSettingsForTest,
 } from '../phase0/helpers/loaders.mjs';
 import { withTemporaryProject } from '../phase0/helpers/workspace.mjs';
+
+let chromium;
+let playwrightSkipReason = false;
+try {
+  ({ chromium } = await import('playwright'));
+} catch (error) {
+  if (!['ERR_MODULE_NOT_FOUND', 'MODULE_NOT_FOUND'].includes(error?.code)) throw error;
+  playwrightSkipReason = 'Playwright が未導入のため、レイアウト検査を実行できません。`npm i -D playwright` と `npx playwright install chromium` を実行してください';
+}
 
 function seededRandom(seed = 0x5eed1234) {
   let value = seed >>> 0;
@@ -139,7 +147,7 @@ test('D-07: the narrow media query contains only final size-manager overrides', 
   });
 });
 
-test('D-08: settings layout has no horizontal overflow at target widths', async () => {
+test('D-08: settings layout has no horizontal overflow at target widths', { skip: playwrightSkipReason }, async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const browser = await chromium.launch({
       headless: true,

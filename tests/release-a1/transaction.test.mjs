@@ -293,6 +293,7 @@ test('A1-11: every runtime shared module is included in the packaged app', async
       'shared/distribution-defaults.js',
       'shared/asset-validation.js',
       'shared/config-rules.js',
+      'shared/concurrency.js',
       'shared/image-decode.js',
     ]) {
       assert.equal(fs.existsSync(path.join(projectRoot, relativePath)), true, relativePath);

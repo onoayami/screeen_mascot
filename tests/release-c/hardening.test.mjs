@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import vm from 'node:vm';
 import { createRequire } from 'node:module';
 import { loadMainForTest, loadSettingsForTest } from '../phase0/helpers/loaders.mjs';
 import { withTemporaryProject } from '../phase0/helpers/workspace.mjs';
@@ -67,6 +69,107 @@ test('character directory preparation is reused but its symlink safety check rem
   });
 });
 
+test('startup removes only matching config temporary files and preserves other character files', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot, userCharacters }) => {
+    const firstRun = loadMainForTest({
+      projectRoot,
+      userDataRoot,
+      appOverrides: { isPackaged: true },
+    });
+    firstRun.api.ensureCharacterDirectory();
+    firstRun.api.loadNormalizedConfig();
+
+    const configPath = path.join(userCharacters, 'config.json');
+    const backupPath = path.join(userCharacters, 'config.backup.json');
+    const configBefore = fs.readFileSync(configPath);
+    const backupBefore = fs.readFileSync(backupPath);
+    const imagePath = path.join(userCharacters, 'actions', 'rest.svg');
+    const imageBefore = fs.readFileSync(imagePath);
+    const staleFiles = [
+      `config.json.${process.pid}.${randomUUID()}.tmp`,
+      `config.backup.json.${process.pid}.${randomUUID()}.tmp`,
+    ];
+    const preservedFiles = [
+      'config.json.tmp',
+      'config.json.123.not-a-uuid.tmp',
+      `config.json.123.${randomUUID()}.tmp.extra`,
+      'config.recovery-123.json',
+      'unrelated.tmp',
+    ];
+    for (const name of [...staleFiles, ...preservedFiles]) {
+      fs.writeFileSync(path.join(userCharacters, name), name);
+    }
+
+    const symbolicTemporary = `config.json.${process.pid}.${randomUUID()}.tmp`;
+    fs.symlinkSync('config.json', path.join(userCharacters, symbolicTemporary));
+
+    const restarted = loadMainForTest({
+      projectRoot,
+      userDataRoot,
+      appOverrides: { isPackaged: true },
+    });
+    assert.equal(restarted.api.ensureCharacterDirectory(), userCharacters);
+
+    for (const name of staleFiles) assert.equal(fs.existsSync(path.join(userCharacters, name)), false);
+    for (const name of preservedFiles) assert.equal(fs.existsSync(path.join(userCharacters, name)), true);
+    assert.equal(fs.lstatSync(path.join(userCharacters, symbolicTemporary)).isSymbolicLink(), true);
+    assert.deepEqual(fs.readFileSync(configPath), configBefore);
+    assert.deepEqual(fs.readFileSync(backupPath), backupBefore);
+    assert.deepEqual(fs.readFileSync(imagePath), imageBefore);
+  });
+});
+
+test('temporary-file cleanup failures warn and do not stop character-directory preparation', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot, userCharacters }) => {
+    const firstRun = loadMainForTest({
+      projectRoot,
+      userDataRoot,
+      appOverrides: { isPackaged: true },
+    });
+    firstRun.api.ensureCharacterDirectory();
+    firstRun.api.loadNormalizedConfig();
+    const staleName = `config.json.${process.pid}.${randomUUID()}.tmp`;
+    const stalePath = path.join(userCharacters, staleName);
+    fs.writeFileSync(stalePath, 'partial write');
+    const warnings = [];
+    const originalWarn = console.warn;
+    console.warn = (...args) => warnings.push(args);
+
+    try {
+      const restarted = loadMainForTest({
+        projectRoot,
+        userDataRoot,
+        appOverrides: { isPackaged: true },
+        fsOverrides: {
+          unlinkSync(filePath, ...args) {
+            if (path.basename(String(filePath)) === staleName) throw new Error('injected cleanup failure');
+            return fs.unlinkSync(filePath, ...args);
+          },
+        },
+      });
+      assert.equal(restarted.api.ensureCharacterDirectory(), userCharacters);
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    assert.equal(fs.existsSync(stalePath), true);
+    assert.equal(warnings.length, 1);
+    assert.match(String(warnings[0][0]), /設定の一時ファイルを削除できませんでした/);
+  });
+});
+
+test('toggleVisibility safely ignores a destroyed mascot window', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const main = loadMainForTest({ projectRoot, userDataRoot });
+    main.api.setMascotWindow({
+      isDestroyed: () => true,
+      isVisible() { throw new Error('destroyed window must not be queried'); },
+    });
+
+    assert.equal(main.api.toggleVisibility(), false);
+  });
+});
+
 test('image signatures read only a 64 KB head except for GIF', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const validation = projectRequire(projectRoot)('./shared/asset-validation.js');
@@ -113,6 +216,42 @@ test('image signatures read only a 64 KB head except for GIF', async () => {
     ]));
     assert.equal(validation.validateImageSignature(gifPath, gifPath, fsModule), true);
     assert.deepEqual(fullReads, ['small.gif']);
+  });
+});
+
+test('transparent PNG size is rejected before Buffer copying and normal PNGs still save', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot, userCharacters }) => {
+    const main = loadMainForTest({ projectRoot, userDataRoot });
+    let copyCalls = 0;
+    main.context.Buffer = new Proxy(Buffer, {
+      get(target, property) {
+        if (property === 'from') {
+          return (...args) => {
+            copyCalls += 1;
+            return Buffer.from(...args);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const { MAX_IMAGE_FILE_BYTES } = projectRequire(projectRoot)('./shared/asset-validation.js');
+    const oversized = vm.runInContext(`new ArrayBuffer(${MAX_IMAGE_FILE_BYTES + 1})`, main.context);
+    main.context.oversizedInput = oversized;
+    const oversizedView = vm.runInContext('new Uint8Array(oversizedInput)', main.context);
+    for (const input of [oversized, oversizedView]) {
+      assert.throws(
+        () => main.api.saveTransparentPng(input, 'actions', 'too-large.png'),
+        /20MB以下/,
+      );
+    }
+    assert.equal(copyCalls, 0);
+
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const saved = main.api.saveTransparentPng(png, 'actions', 'converted.png');
+    assert.equal(copyCalls, 1);
+    assert.equal(fs.existsSync(path.join(userCharacters, saved.relativePath)), true);
   });
 });
 

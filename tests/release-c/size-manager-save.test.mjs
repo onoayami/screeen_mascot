@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import { loadSettingsForTest } from '../phase0/helpers/loaders.mjs';
 import { withTemporaryProject } from '../phase0/helpers/workspace.mjs';
@@ -57,6 +59,7 @@ test('size manager save applies the working transform and saves once before meas
   await withTemporaryProject(async ({ projectRoot }) => {
     const metadata = deferred();
     const savedPayloads = [];
+    const html = fs.readFileSync(path.join(projectRoot, 'settings.html'), 'utf8');
     const settings = loadSettingsForTest({
       projectRoot,
       ImageClass: LoadingImage,
@@ -70,42 +73,27 @@ test('size manager save applies the working transform and saves once before meas
     });
 
     openSizeManager(settings);
+    const sizeManagerDialog = html.match(/<dialog id="size-manager-dialog"[\s\S]*?<\/dialog>/)?.[0];
+    const sizeManagerActions = sizeManagerDialog?.match(/<footer class="jpeg-dialog-actions">([\s\S]*?)<\/footer>/)?.[1];
+    assert.ok(sizeManagerActions);
+    assert.equal((sizeManagerActions.match(/<button\b/g) || []).length, 2);
+    assert.match(sizeManagerActions, /id="size-manager-cancel"/);
+    assert.match(sizeManagerActions, /id="size-manager-save"[^>]*>保存して反映/);
     setSizeScale(settings.api.elements, 1.75);
     await settings.api.elements.sizeManagerSave.onclick();
 
     assert.equal(savedPayloads.length, 1);
     assert.deepEqual(JSON.parse(JSON.stringify(savedPayloads[0].actions[0].imageTransform)), {
+      flipX: false,
       scale: 1.75,
       offsetX: 0,
       offsetY: 0,
     });
     assert.equal(settings.api.elements.sizeManagerDialog.open, false);
     assert.match(settings.api.elements.toast.textContent, /設定を保存し/);
-    assert.doesNotMatch(settings.api.elements.toast.textContent, /全画像の表示サイズを反映しました/);
 
     metadata.resolve({ cacheKey: 'late-measurement' });
     await new Promise((resolve) => setImmediate(resolve));
-  });
-});
-
-test('size manager apply keeps its unsaved behavior and does not call saveConfig', async () => {
-  await withTemporaryProject(async ({ projectRoot }) => {
-    let saveCalls = 0;
-    const settings = loadSettingsForTest({
-      projectRoot,
-      ImageClass: LoadingImage,
-      mascotAPI: { saveConfig: async () => { saveCalls += 1; return { ok: true }; } },
-    });
-
-    openSizeManager(settings);
-    setSizeScale(settings.api.elements, 1.5);
-    settings.api.elements.sizeManagerApply.onclick();
-
-    assert.equal(saveCalls, 0);
-    assert.equal(settings.api.state.actions[0].imageTransform.scale, 1.5);
-    assert.equal(settings.api.state.dirty, true);
-    assert.equal(settings.api.elements.sizeManagerDialog.open, false);
-    assert.equal(settings.api.elements.toast.textContent, '全画像の表示サイズを反映しました。');
   });
 });
 

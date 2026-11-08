@@ -205,6 +205,58 @@ test('A3-08: the source ZIP is deterministic and marks Japanese names as UTF-8',
   }
 });
 
+test('A3-11: source ZIP rejects untracked Git files and ignores standard exclusions', () => {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mascot-a3-untracked-'));
+  try {
+    const source = path.join(temporaryRoot, 'source');
+    const characters = path.join(source, 'characters', 'default');
+    const actions = path.join(characters, 'actions');
+    fs.mkdirSync(actions, { recursive: true });
+    const initialized = spawnSync('git', ['init', '--quiet', source], { encoding: 'utf8' });
+    assert.equal(initialized.status, 0, combinedOutput(initialized));
+
+    const gitExclude = path.join(source, '.git', 'info', 'exclude');
+    fs.writeFileSync(
+      gitExclude,
+      'characters/default/config.json\ncharacters/default/actions/rest.svg\nignored-local.txt\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(characters, 'config.json'),
+      `${JSON.stringify({ actions: [{ name: 'rest', file: 'actions/rest.svg' }] })}\n`,
+      'utf8',
+    );
+    fs.writeFileSync(path.join(actions, 'rest.svg'), '<svg/>\n', 'utf8');
+    fs.writeFileSync(path.join(source, 'ignored-local.txt'), 'ignored\n', 'utf8');
+    const untrackedPath = path.join(source, 'new-source.js');
+    fs.writeFileSync(untrackedPath, 'export const value = true;\n', 'utf8');
+
+    const script = path.join(projectRoot, 'scripts', 'create-source-zip.py');
+    const outputs = [path.join(temporaryRoot, 'one.zip'), path.join(temporaryRoot, 'two.zip')];
+    const runZip = (output) => spawnSync('python3', [
+      script,
+      '--root', source,
+      '--output', output,
+      '--prefix', 'desktop-mascot',
+    ], { encoding: 'utf8' });
+
+    const rejected = runZip(outputs[0]);
+    assert.notEqual(rejected.status, 0);
+    assert.match(combinedOutput(rejected), /new-source\.js/);
+    assert.doesNotMatch(combinedOutput(rejected), /ignored-local\.txt/);
+    assert.equal(fs.existsSync(outputs[0]), false);
+
+    fs.unlinkSync(untrackedPath);
+    for (const output of outputs) {
+      const result = runZip(output);
+      assert.equal(result.status, 0, combinedOutput(result));
+    }
+    assert.equal(sha256(outputs[0]), sha256(outputs[1]));
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+});
+
 test('A3-09: package metadata pins Mac-verified dependency and tool versions', {
   todo: 'Electron／electron-builderの版、Node、最低macOSはMac実機確認後に確定する。',
 }, () => {});

@@ -69,9 +69,16 @@ test('size manager dragging updates working offsets without disrupting the scale
   await withTemporaryProject(async ({ projectRoot }) => {
     let resolveMetadata;
     const metadata = new Promise((resolve) => { resolveMetadata = resolve; });
+    const savedPayloads = [];
     const settings = loadSettingsForTest({
       projectRoot,
-      mascotAPI: { getAssetMetadata: () => metadata },
+      mascotAPI: {
+        getAssetMetadata: () => metadata,
+        saveConfig: async (config) => {
+          savedPayloads.push(config);
+          return { ok: true, applied: true, config };
+        },
+      },
     });
     configureAction(settings);
     settings.nodes.get('open-size-manager').dispatchEvent({ type: 'click' });
@@ -88,7 +95,7 @@ test('size manager dragging updates working offsets without disrupting the scale
     assert.ok(slider);
     slider.value = '1.75';
     slider.dispatchEvent({ type: 'input' });
-    settings.api.elements.sizeManagerApply.onclick();
+    await settings.api.elements.sizeManagerSave.onclick();
 
     assert.deepEqual(
       {
@@ -97,6 +104,10 @@ test('size manager dragging updates working offsets without disrupting the scale
         offsetY: settings.api.state.actions[0].imageTransform.offsetY,
       },
       { scale: 1.75, offsetX: 10, offsetY: -10 },
+    );
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(savedPayloads[0].actions[0].imageTransform)),
+      { flipX: false, scale: 1.75, offsetX: 10, offsetY: -10 },
     );
     resolveMetadata({ cacheKey: 'late-measurement' });
     await new Promise((resolve) => setImmediate(resolve));

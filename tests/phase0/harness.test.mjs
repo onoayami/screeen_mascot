@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import {
   PROJECT_ROOT,
   assertBaselineCheckpointIntact,
+  assertPackageOnlyAddsApprovedReleaseChanges,
   assertPackageOnlyAddsApprovedTestScripts,
   currentProjectManifest,
   loadBaselineManifest,
@@ -62,4 +63,43 @@ test('Phase 0: shared rule modules are pure and importable', () => {
   assert.equal(assets.hasAllowedImageExtension('actions/readme.txt'), false);
   assert.equal(assets.isLexicallyInsideRoot('/safe/root', '/safe/root/actions/a.png'), true);
   assert.equal(assets.isLexicallyInsideRoot('/safe/root', '/safe/outside.png'), false);
+});
+
+test('Phase 0: only approved release metadata and matching dependency locks are accepted', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    const packagePath = path.join(projectRoot, 'package.json');
+    const lockPath = path.join(projectRoot, 'package-lock.json');
+    const original = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    if (fs.existsSync(lockPath)) fs.unlinkSync(lockPath);
+
+    assertPackageOnlyAddsApprovedReleaseChanges(projectRoot);
+
+    const invalidChanges = [
+      [(pkg) => { pkg.author = 'someone-else'; }, /unexpected author/],
+      [(pkg) => { pkg.build.appId = 'com.invalid.other'; }, /unexpected build\.appId/],
+      [(pkg) => { pkg.devDependencies.electron = '45.2.2'; }, /unexpected devDependency electron/],
+      [(pkg) => { pkg.devDependencies.extra = '1.0.0'; }, /unexpected devDependencies/],
+    ];
+    for (const [mutate, error] of invalidChanges) {
+      const invalid = structuredClone(original);
+      mutate(invalid);
+      fs.writeFileSync(packagePath, `${JSON.stringify(invalid, null, 2)}\n`);
+      assert.throws(() => assertPackageOnlyAddsApprovedReleaseChanges(projectRoot), error);
+    }
+
+    fs.writeFileSync(packagePath, `${JSON.stringify(original, null, 2)}\n`);
+    const validLock = {
+      packages: {
+        '': { devDependencies: { electron: '45.2.3', 'electron-builder': '26.18.0' } },
+        'node_modules/electron': { version: '45.2.3' },
+        'node_modules/electron-builder': { version: '26.18.0' },
+      },
+    };
+    fs.writeFileSync(lockPath, `${JSON.stringify(validLock, null, 2)}\n`);
+    assertPackageOnlyAddsApprovedReleaseChanges(projectRoot);
+
+    validLock.packages['node_modules/electron'].version = '45.2.2';
+    fs.writeFileSync(lockPath, `${JSON.stringify(validLock, null, 2)}\n`);
+    assert.throws(() => assertPackageOnlyAddsApprovedReleaseChanges(projectRoot));
+  });
 });

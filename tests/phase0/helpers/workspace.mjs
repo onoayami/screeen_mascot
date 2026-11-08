@@ -56,6 +56,14 @@ const APPROVED_RELEASE_SCRIPTS = Object.freeze({
   'check:release-text': 'node scripts/check-release-text.js',
   'package:source': 'npm run check && python3 scripts/create-source-zip.py',
 });
+const APPROVED_RELEASE_METADATA = Object.freeze({
+  author: 'onoayami',
+  appId: 'com.github.onoayami.desktopmascot',
+  devDependencies: Object.freeze({
+    electron: '45.2.3',
+    'electron-builder': '26.18.0',
+  }),
+});
 const EXACT_DEPENDENCY_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 export function sha256Buffer(value) {
@@ -81,9 +89,10 @@ export function manifestForPaths(root, rows = loadBaselineManifest()) {
   });
 }
 
-export function assertPackageOnlyAddsApprovedReleaseChanges() {
-  const baseline = JSON.parse(fs.readFileSync(BASELINE_PACKAGE_PATH, 'utf8'));
-  const current = JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT, 'package.json'), 'utf8'));
+export function assertPackageOnlyAddsApprovedReleaseChanges(projectRoot = PROJECT_ROOT) {
+  const baselinePackagePath = path.join(projectRoot, 'tests', 'phase0', 'fixtures', 'package.v2.3.4.json');
+  const baseline = JSON.parse(fs.readFileSync(baselinePackagePath, 'utf8'));
+  const current = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
   assert.equal(current.scripts?.check, APPROVED_CHECK_SCRIPT, 'unexpected check script');
   current.scripts.check = baseline.scripts.check;
   for (const [scriptName, command] of Object.entries(APPROVED_RELEASE_SCRIPTS)) {
@@ -98,17 +107,33 @@ export function assertPackageOnlyAddsApprovedReleaseChanges() {
     assert.equal(current.scripts?.[scriptName], command, `unexpected ${scriptName}`);
     delete current.scripts[scriptName];
   }
-  const lockPath = path.join(PROJECT_ROOT, 'package-lock.json');
+  assert.equal(current.author, APPROVED_RELEASE_METADATA.author, 'unexpected author');
+  current.author = baseline.author;
+  assert.equal(current.build?.appId, APPROVED_RELEASE_METADATA.appId, 'unexpected build.appId');
+  if (current.build && typeof current.build === 'object') current.build.appId = baseline.build.appId;
+
+  const expectedDependencies = APPROVED_RELEASE_METADATA.devDependencies;
+  assert.deepEqual(
+    Object.keys(current.devDependencies || {}).sort(),
+    Object.keys(expectedDependencies).sort(),
+    'unexpected devDependencies',
+  );
+  for (const [dependency, expected] of Object.entries(expectedDependencies)) {
+    const declared = current.devDependencies?.[dependency];
+    assert.equal(declared, expected, `unexpected devDependency ${dependency}`);
+    assert.match(declared || '', EXACT_DEPENDENCY_VERSION, `${dependency} must be exact`);
+  }
+
+  const lockPath = path.join(projectRoot, 'package-lock.json');
   if (fs.existsSync(lockPath)) {
     const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
-    for (const dependency of ['electron', 'electron-builder']) {
+    for (const dependency of Object.keys(expectedDependencies)) {
       const declared = current.devDependencies?.[dependency];
-      assert.match(declared || '', EXACT_DEPENDENCY_VERSION, `${dependency} must be exact`);
       assert.equal(lock.packages?.['']?.devDependencies?.[dependency], declared);
       assert.equal(lock.packages?.[`node_modules/${dependency}`]?.version, declared);
     }
-    current.devDependencies = baseline.devDependencies;
   }
+  current.devDependencies = baseline.devDependencies;
   assert.ok(Array.isArray(current.build?.files), 'build.files must be an array');
   for (const approvedFile of APPROVED_RUNTIME_BUILD_FILES) {
     const matchingIndexes = current.build.files

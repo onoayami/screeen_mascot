@@ -44,7 +44,7 @@ body {
   pointer-events: none;
   -webkit-user-drag: none;
   filter: drop-shadow(0 8px 12px rgba(0, 0, 0, 0.14));
-  transform: translate(var(--image-offset-x, 0%), var(--image-offset-y, 0%)) scaleX(var(--image-flip-x, 1)) scale(var(--image-scale, 1));
+  transform: translate(var(--image-offset-x, 0%), var(--image-offset-y, 0%)) scaleX(calc(var(--image-flip-x, 1) * var(--image-base-flip-x, 1))) scale(var(--image-scale, 1));
   transform-origin: center;
   will-change: transform;
 }

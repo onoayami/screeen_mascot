@@ -5,6 +5,9 @@ const statusElement = document.getElementById('status');
 const SAFE_EDGE_INSET = 12;
 const IMAGE_DECODE_CONCURRENCY = 4;
 const MAX_EFFECTS = 100;
+const DEFAULT_DURATION_MS = window.DesktopMascotConfigRules.DEFAULT_DURATION_MS;
+const mapWithConcurrency = window.DesktopMascotConcurrency.mapWithConcurrency;
+const failedActionIds = new Set();
 
 const state = {
   config: null,
@@ -22,6 +25,7 @@ const state = {
   passthrough: true,
   randomFlip: 1,
   facing: 1,
+  directionalFlip: 1,
   reloadGeneration: 0,
   lastVisibilityCheckAt: 0,
   pointerPosition: null,
@@ -42,9 +46,6 @@ function randomBetween(min, max) {
   return min + Math.random() * Math.max(0, max - min);
 }
 
-// Keep in sync with shared/config-rules.js.
-const DEFAULT_DURATION_MS = Object.freeze([6000, 10000]);
-
 function durationFor(action) {
   const value = action.durationMs;
   if (Array.isArray(value) && value.length >= 2) {
@@ -54,7 +55,7 @@ function durationFor(action) {
 }
 
 function chooseWeightedAction() {
-  const candidates = state.actions;
+  const candidates = state.actions.filter((action) => !failedActionIds.has(action._uiId));
   if (candidates.length === 0) return null;
   const total = candidates.reduce((sum, action) => sum + Math.max(1, Number(action.weight) || 1), 0);
   let cursor = Math.random() * total;
@@ -73,8 +74,16 @@ function configuredMascotSize() {
 }
 
 function maximumMascotSize() {
-  const availableWidth = Math.max(1, (Number(window.innerWidth) || 0) - SAFE_EDGE_INSET * 2);
-  const availableHeight = Math.max(1, (Number(window.innerHeight) || 0) - SAFE_EDGE_INSET * 2);
+  const viewportWidth = Number(window.innerWidth);
+  const viewportHeight = Number(window.innerHeight);
+  const availableWidth = Math.max(
+    1,
+    (Number.isFinite(viewportWidth) && viewportWidth > 0 ? viewportWidth : 1) - SAFE_EDGE_INSET * 2,
+  );
+  const availableHeight = Math.max(
+    1,
+    (Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 1) - SAFE_EDGE_INSET * 2,
+  );
   return Math.min(availableWidth, availableHeight);
 }
 
@@ -98,7 +107,8 @@ function configuredMargin() {
 }
 
 function axisMovementBounds(viewportSize, mascotSize) {
-  const viewport = Math.max(0, Number(viewportSize) || 0);
+  const numericViewport = Number(viewportSize);
+  const viewport = Number.isFinite(numericViewport) && numericViewport > 0 ? numericViewport : 1;
   const sprite = Math.max(1, Number(mascotSize) || 1);
   if (viewport <= sprite) {
     const centered = (viewport - sprite) / 2;
@@ -163,8 +173,9 @@ function loadSavedPosition() {
 
 function ensureMascotVisible({ save = false } = {}) {
   renderMascotSize();
-  const next = clampPosition(state.position.x, state.position.y);
-  const changed = next.x !== state.position.x || next.y !== state.position.y;
+  const current = state.position || {};
+  const next = clampPosition(current.x, current.y);
+  const changed = next.x !== current.x || next.y !== current.y;
   state.position = next;
   renderPosition();
   if (save && changed) savePosition();
@@ -202,8 +213,9 @@ function setMousePassthrough(ignore) {
 }
 
 function pointIsInsideMascot(x, y) {
-  const rect = mascotElement.getBoundingClientRect();
-  return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  const size = getMascotWidth();
+  return x >= state.position.x && x <= state.position.x + size
+    && y >= state.position.y && y <= state.position.y + size;
 }
 
 function refreshPointerPassthrough() {
@@ -246,7 +258,9 @@ function createEffect() {
   effectElement.alt = '';
   effectElement.style.width = `${size}px`;
   effectElement.style.left = `${
-    state.position.x + getMascotWidth() / 2 + (Number(effect.offsetX) || 0)
+    state.position.x
+    + getMascotWidth() / 2
+    + (Number(effect.offsetX) || 0) * state.directionalFlip
   }px`;
   effectElement.style.top = `${
     state.position.y + mascotHeight - (Number(effect.offsetY) || 0)
@@ -291,17 +305,18 @@ function randomX() {
 
 function applyActionImageTransform(action) {
   const transform = action?.imageTransform || {};
+  const flipX = transform.flipX === true ? -1 : 1;
   const scale = Math.min(3, Math.max(0.3, Number(transform.scale) || 1));
   const offsetX = Math.min(100, Math.max(-100, Number(transform.offsetX) || 0));
   const offsetY = Math.min(100, Math.max(-100, Number(transform.offsetY) || 0));
+  mascotImage.style.setProperty('--image-base-flip-x', String(flipX));
   mascotImage.style.setProperty('--image-scale', String(scale));
   mascotImage.style.setProperty('--image-offset-x', `${offsetX}%`);
   mascotImage.style.setProperty('--image-offset-y', `${offsetY}%`);
 }
 
 function applyFlip() {
-  const mode = state.currentAction?.flipMode
-    || (state.currentAction?.flipWithDirection === false ? 'none' : 'direction');
+  const mode = state.currentAction?.flipMode || 'direction';
   let flip = 1;
 
   if (mode === 'random') {
@@ -312,6 +327,7 @@ function applyFlip() {
     flip = state.facing;
   }
 
+  state.directionalFlip = flip;
   mascotImage.style.setProperty('--image-flip-x', String(flip));
 }
 
@@ -446,27 +462,6 @@ async function resolveAction(action) {
   return { ...action, assetUrl, effect };
 }
 
-async function mapWithConcurrency(items, concurrency, mapper) {
-  const values = Array.from(items || []);
-  const results = new Array(values.length);
-  const workerCount = Math.min(
-    values.length,
-    Math.max(1, Math.floor(Number(concurrency) || 1)),
-  );
-  let cursor = 0;
-
-  async function worker() {
-    while (cursor < values.length) {
-      const index = cursor;
-      cursor += 1;
-      results[index] = await mapper(values[index], index);
-    }
-  }
-
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return results;
-}
-
 async function reloadConfig({
   keepPosition = true,
   preferredActionIndex = null,
@@ -492,11 +487,12 @@ async function reloadConfig({
       return { ok: false, superseded: true, error: 'より新しい設定の読み込みを優先しました。' };
     }
 
+    failedActionIds.clear();
     state.config = config;
     state.actions = resolvedActions;
     renderMascotSize();
 
-    const preserved = keepPosition ? state.position : null;
+    const preserved = keepPosition && state.currentAction ? state.position : null;
     const saved = loadSavedPosition();
     state.position = clampPosition(
       preserved?.x ?? saved?.x ?? configuredStartPosition().x,
@@ -665,7 +661,7 @@ function finishDrag(event) {
 
 window.addEventListener('pointerup', finishDrag);
 window.addEventListener('pointercancel', finishDrag);
-window.addEventListener('mouseleave', () => {
+document.documentElement.addEventListener('mouseleave', () => {
   if (!state.isDragging) {
     state.pointerPosition = null;
     setMousePassthrough(true);
@@ -690,10 +686,20 @@ mascotElement.addEventListener('mouseleave', (event) => {
     setMousePassthrough(!pointIsInsideMascot(event.clientX, event.clientY));
   }
 });
-mascotImage.addEventListener('load', () => setPosition(state.position.x, state.position.y));
-mascotImage.addEventListener('error', () => {
+function handleMascotImageError() {
+  if (state.currentAction) failedActionIds.add(state.currentAction._uiId);
+  window.mascotAPI.reportDiagnostic?.('image-load-failed');
   showStatus('画像を表示できません。🪼メニューから画像・設定フォルダを確認してください。');
+  const nextAction = chooseWeightedAction();
+  if (nextAction) setAction(nextAction);
+}
+
+mascotImage.addEventListener('load', () => {
+  if (state.currentAction) failedActionIds.delete(state.currentAction._uiId);
+  clearStatus();
+  setPosition(state.position.x, state.position.y);
 });
+mascotImage.addEventListener('error', handleMascotImageError);
 
 window.mascotAPI.onCommand(async ({ command, value }) => {
   if (command === 'set-paused') {
@@ -737,6 +743,12 @@ window.mascotAPI.onCommand(async ({ command, value }) => {
     }
   }
 });
+
+window.addEventListener('error', () => window.mascotAPI.reportDiagnostic?.('window-error'));
+window.addEventListener(
+  'unhandledrejection',
+  () => window.mascotAPI.reportDiagnostic?.('unhandled-rejection'),
+);
 
 reloadConfig({ keepPosition: false }).then(() => {
   requestAnimationFrame(animationFrame);

@@ -1,4 +1,9 @@
-'use strict';
+(function exposeConfigRules(root, factory) {
+  const configRules = factory();
+  if (typeof module === 'object' && module.exports) module.exports = configRules;
+  else root.DesktopMascotConfigRules = configRules;
+})(globalThis, function createConfigRules() {
+  'use strict';
 
 const ALLOWED_MOVEMENTS = Object.freeze([
   'still',
@@ -21,17 +26,17 @@ const ALLOWED_START_POSITIONS = Object.freeze([
 const DEFAULT_DURATION_MS = Object.freeze([6000, 10000]);
 
 const CONFIG_RULES = Object.freeze({
-  actionCount: Object.freeze({ minimum: 1, maximum: 100, proposedMaximum: 100 }),
+  actionCount: Object.freeze({ minimum: 1, maximum: 100 }),
   weight: Object.freeze({ minimum: 1, maximum: 10, integer: true }),
-  durationMs: Object.freeze({ minimum: 500, maximum: 600000 }),
+  durationMs: Object.freeze({ minimum: 500, maximum: 600000, integer: true }),
   mascotSize: Object.freeze({ minimum: 32, maximum: 1000 }),
   margin: Object.freeze({ minimum: 0, maximum: 1000 }),
   movementSpeed: Object.freeze({ minimum: 0, maximum: 2000 }),
   imageScale: Object.freeze({ minimum: 0.3, maximum: 3 }),
   imageOffset: Object.freeze({ minimum: -100, maximum: 100 }),
-  effectIntervalMs: Object.freeze({ minimum: 50, maximum: 60000 }),
+  effectIntervalMs: Object.freeze({ minimum: 50, maximum: 60000, integer: true }),
   effectSize: Object.freeze({ minimum: 4, maximum: 1000 }),
-  effectLifetimeMs: Object.freeze({ minimum: 50, maximum: 60000 }),
+  effectLifetimeMs: Object.freeze({ minimum: 50, maximum: 60000, integer: true }),
   effectOffset: Object.freeze({ minimum: -5000, maximum: 5000 }),
 });
 
@@ -213,6 +218,12 @@ function normalizeAction(action, index, validateAsset) {
     durationMs: normalizeDuration(action, field),
     flipMode,
     imageTransform: {
+      flipX: booleanOrDefault(
+        transformInput,
+        'flipX',
+        `${field}.imageTransform.flipX`,
+        false,
+      ),
       scale: numberOrDefault(
         transformInput,
         'scale',
@@ -299,11 +310,12 @@ function validateAndNormalizeConfig(input, { validateAsset } = {}) {
   };
 }
 
-module.exports = {
+return Object.freeze({
   ALLOWED_MOVEMENTS,
   ALLOWED_FLIP_MODES,
   ALLOWED_START_POSITIONS,
   DEFAULT_DURATION_MS,
   CONFIG_RULES,
   validateAndNormalizeConfig,
-};
+});
+});

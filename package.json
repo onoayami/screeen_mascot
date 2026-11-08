@@ -3,7 +3,7 @@
   "productName": "Desktop Mascot",
   "version": "2.3.4",
   "description": "A transparent desktop mascot with never-lost screen recovery, verified live apply, effect preview, and no-code image editing",
-  "author": "YOUR NAME",
+  "author": "onoayami",
   "license": "MIT",
   "main": "main.js",
   "scripts": {
@@ -29,11 +29,11 @@
     "check:build-lock": "node scripts/check-build-lock.js"
   },
   "devDependencies": {
-    "electron": "latest",
-    "electron-builder": "latest"
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
   },
   "build": {
-    "appId": "com.example.desktopmascot",
+    "appId": "com.github.onoayami.desktopmascot",
     "productName": "Desktop Mascot",
     "asar": true,
     "artifactName": "${productName}-${version}-${arch}.${ext}",

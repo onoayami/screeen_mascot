@@ -88,8 +88,10 @@ export function createElementStub(id = '', tagName = 'div') {
 export function createDomStub() {
   const nodes = new Map();
   const documentListeners = new Map();
+  const documentElement = createElementStub('documentElement', 'html');
   const document = {
     hidden: false,
+    documentElement,
     getElementById(id) {
       if (!nodes.has(id)) nodes.set(id, createElementStub(id));
       return nodes.get(id);

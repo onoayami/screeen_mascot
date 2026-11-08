@@ -88,7 +88,16 @@ test('missing durations loaded into settings use the defaults in state, editor, 
     settings.api.elements.durationMin.dispatchEvent({ type: 'input' });
     settings.api.elements.durationMax.value = 'invalid';
     settings.api.elements.durationMax.dispatchEvent({ type: 'input' });
-    assert.deepEqual(Array.from(settings.api.state.actions[0].durationMs), [6000, 10000]);
+    assert.ok(Number.isNaN(settings.api.state.actions[0].durationMs[0]));
+    assert.ok(Number.isNaN(settings.api.state.actions[0].durationMs[1]));
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      assert.equal(await settings.api.saveConfiguration(), false);
+    } finally {
+      console.error = originalError;
+    }
+    assert.equal(settings.api.elements.feedback.textContent, '動作1の最短時間を入力してください。');
   });
 });
 
@@ -112,34 +121,6 @@ test('shared config normalization uses the new defaults only when durationMs is 
   });
 });
 
-test('bulk apply overwrites every action, remains unsaved, and does not save', async () => {
-  await withTemporaryProject(async ({ projectRoot }) => {
-    let saveCalls = 0;
-    const settings = loadSettingsForTest({
-      projectRoot,
-      mascotAPI: { saveConfig: async () => { saveCalls += 1; return { ok: true }; } },
-    });
-    configureSettings(settings, [[2500, 6500], [4000, 9000]]);
-    openDurationBulk(settings);
-
-    assert.equal(settings.api.elements.durationBulkMin.value, 2.5);
-    assert.equal(settings.api.elements.durationBulkMax.value, 6.5);
-    assert.equal(settings.api.elements.durationBulkCount.textContent, '全2件の動作の時間が、上書きされます。');
-    settings.api.elements.durationBulkMin.value = '1.5';
-    settings.api.elements.durationBulkMax.value = '2.5';
-    await click(settings.api.elements.durationBulkApply);
-
-    assert.deepEqual(
-      settings.api.state.actions.map((action) => Array.from(action.durationMs)),
-      [[1500, 2500], [1500, 2500]],
-    );
-    assert.equal(settings.api.state.dirty, true);
-    assert.equal(settings.api.elements.durationBulkDialog.open, false);
-    assert.equal(settings.api.elements.toast.textContent, '全動作の表示時間を設定しました。');
-    assert.equal(saveCalls, 0);
-  });
-});
-
 test('bulk save sends the new duration for every action exactly once', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const savedPayloads = [];
@@ -152,6 +133,15 @@ test('bulk save sends the new duration for every action exactly once', async () 
         },
       },
     });
+    const html = fs.readFileSync(path.join(projectRoot, 'settings.html'), 'utf8');
+    const dialogStart = html.indexOf('<dialog id="duration-bulk-dialog"');
+    const dialogEnd = html.indexOf('</dialog>', dialogStart);
+    assert.ok(dialogStart >= 0 && dialogEnd >= dialogStart);
+    const dialogMarkup = html.slice(dialogStart, dialogEnd);
+    assert.equal((dialogMarkup.match(/<button\b/g) || []).length, 2);
+    assert.match(dialogMarkup, /id="duration-bulk-cancel"[^>]*>キャンセル/);
+    assert.match(dialogMarkup, /id="duration-bulk-save"[^>]*>保存して反映/);
+    assert.doesNotMatch(dialogMarkup, /duration-bulk-apply|この時間を使う/);
     configureSettings(settings, [[1000, 2000], [3000, 4000]]);
     openDurationBulk(settings);
     settings.api.elements.durationBulkMin.value = '3';
@@ -204,12 +194,14 @@ test('bulk duration validation rejects reversed and out-of-range values without 
 
     for (const [minimum, maximum, expectedError] of [
       ['2', '1', /最短時間は最長時間以下/],
+      ['', '1', /最短時間を入力してください/],
+      ['1', '', /最長時間を入力してください/],
       ['0.4', '1', /0\.5〜600秒/],
       ['1', '601', /0\.5〜600秒/],
     ]) {
       settings.api.elements.durationBulkMin.value = minimum;
       settings.api.elements.durationBulkMax.value = maximum;
-      await click(settings.api.elements.durationBulkApply);
+      await click(settings.api.elements.durationBulkSave);
 
       assert.match(settings.api.elements.durationBulkError.textContent, expectedError);
       assert.equal(settings.api.elements.durationBulkError.hidden, false);

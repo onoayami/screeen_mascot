@@ -13,6 +13,9 @@ contextBridge.exposeInMainWorld('mascotAPI', {
   reportApplyResult(payload) {
     ipcRenderer.send('mascot:apply-result', payload);
   },
+  reportDiagnostic(type) {
+    ipcRenderer.send('mascot:diagnostic', type);
+  },
   onCommand(callback) {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('mascot:command', listener);

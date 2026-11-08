@@ -22,9 +22,16 @@ export function loadMainForTest({
   screenOverrides = {},
   dialogOverrides = {},
   nativeImageOverrides = {},
+  timerOverrides = {},
 } = {}) {
   const handlers = new Map();
   const ipcListeners = new Map();
+  const errorBoxes = [];
+  const shownItems = [];
+  const menus = [];
+  const trayInstances = [];
+  const screenListeners = new Map();
+  const powerMonitorListeners = new Map();
   const projectRequire = createRequire(path.join(projectRoot, 'main.js'));
   const wrappedFs = new Proxy(fs, {
     get(target, property) {
@@ -56,6 +63,8 @@ export function loadMainForTest({
       this.listeners = new Map();
       this.sent = [];
       this.windowOpenHandler = null;
+      this.loading = false;
+      this.reloadCount = 0;
     }
 
     on(type, listener) {
@@ -81,7 +90,11 @@ export function loadMainForTest({
 
     send(channel, payload) { this.sent.push({ channel, payload }); }
     isDestroyed() { return this.owner.isDestroyed(); }
-    isLoading() { return false; }
+    isLoading() { return this.loading; }
+    reload() {
+      this.reloadCount += 1;
+      this.loading = true;
+    }
     setWindowOpenHandler(handler) { this.windowOpenHandler = handler; }
   }
 
@@ -92,6 +105,9 @@ export function loadMainForTest({
       this.visible = true;
       this.listeners = new Map();
       this.ignoreMouseCalls = [];
+      this.alwaysOnTop = Boolean(options.alwaysOnTop);
+      this.alwaysOnTopCalls = [];
+      this.setBoundsCalls = [];
       this.bounds = {
         x: options.x || 0,
         y: options.y || 0,
@@ -125,15 +141,29 @@ export function loadMainForTest({
 
     isDestroyed() { return this.destroyed; }
     isVisible() { return this.visible; }
+    isAlwaysOnTop() { return this.alwaysOnTop; }
     show() { this.visible = true; this.emit('show'); }
     showInactive() { this.visible = true; this.emit('show'); }
     hide() { this.visible = false; this.emit('hide'); }
     focus() {}
-    setAlwaysOnTop() {}
+    setAlwaysOnTop(value, level) {
+      this.alwaysOnTop = Boolean(value);
+      this.alwaysOnTopCalls.push({ value: Boolean(value), level });
+    }
     setVisibleOnAllWorkspaces() {}
     setIgnoreMouseEvents(ignore, options) { this.ignoreMouseCalls.push({ ignore, options }); }
     getBounds() { return { ...this.bounds }; }
-    setBounds(bounds) { this.bounds = { ...bounds }; }
+    setBounds(bounds) {
+      this.bounds = { ...bounds };
+      this.setBoundsCalls.push({ ...bounds });
+    }
+    destroy() {
+      if (this.destroyed) return;
+      this.destroyed = true;
+      this.visible = false;
+      this.webContents.emit('destroyed');
+      this.emit('closed');
+    }
     close() {
       let prevented = false;
       this.emit('close', { preventDefault() { prevented = true; } });
@@ -145,11 +175,57 @@ export function loadMainForTest({
     }
   }
 
+  const fakeSetTimeout = timerOverrides.setTimeout || setTimeout;
+  const fakeClearTimeout = timerOverrides.clearTimeout || clearTimeout;
+  const fakeSetInterval = timerOverrides.setInterval || setInterval;
+  const fakeClearInterval = timerOverrides.clearInterval || clearInterval;
+  const screenEmitter = {
+    getAllDisplays: () => [],
+    getCursorScreenPoint: () => ({ x: 0, y: 0 }),
+    getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 800, height: 600 } }),
+    on(type, listener) {
+      if (!screenListeners.has(type)) screenListeners.set(type, []);
+      screenListeners.get(type).push(listener);
+    },
+    emit(type, ...args) {
+      for (const listener of screenListeners.get(type) || []) listener(...args);
+    },
+    ...screenOverrides,
+  };
+  const powerMonitor = {
+    on(type, listener) {
+      if (!powerMonitorListeners.has(type)) powerMonitorListeners.set(type, []);
+      powerMonitorListeners.get(type).push(listener);
+    },
+    emit(type, ...args) {
+      for (const listener of powerMonitorListeners.get(type) || []) listener(...args);
+    },
+  };
+  const fakeShell = {
+    openPath() {},
+    showItemInFolder(filePath) { shownItems.push(filePath); },
+  };
+
   const electron = {
     app,
     BrowserWindow: FakeBrowserWindow,
-    Menu: { setApplicationMenu() {}, buildFromTemplate() { return {}; } },
-    Tray: class {},
+    Menu: {
+      setApplicationMenu() {},
+      buildFromTemplate(template) {
+        const menu = { template };
+        menus.push(menu);
+        return menu;
+      },
+    },
+    Tray: class FakeTray {
+      constructor() {
+        trayInstances.push(this);
+      }
+
+      setTitle(value) { this.title = value; }
+      setToolTip(value) { this.tooltip = value; }
+      setContextMenu(menu) { this.contextMenu = menu; }
+    },
     nativeImage: {
       createEmpty() { return {}; },
       createFromPath() { return { isEmpty() { return false; } }; },
@@ -162,17 +238,12 @@ export function loadMainForTest({
     dialog: {
       async showOpenDialog() { return { canceled: true, filePaths: [] }; },
       async showMessageBox() { return { response: 0 }; },
-      showErrorBox() {},
+      showErrorBox(...args) { errorBoxes.push(args); },
       ...dialogOverrides,
     },
-    shell: { openPath() {} },
-    screen: {
-      getAllDisplays: () => [],
-      getCursorScreenPoint: () => ({ x: 0, y: 0 }),
-      getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 800, height: 600 } }),
-      on() {},
-      ...screenOverrides,
-    },
+    shell: fakeShell,
+    screen: screenEmitter,
+    powerMonitor,
   };
 
   const context = {
@@ -181,8 +252,10 @@ export function loadMainForTest({
     Buffer,
     URL,
     Promise,
-    setTimeout,
-    clearTimeout,
+    setTimeout: fakeSetTimeout,
+    clearTimeout: fakeClearTimeout,
+    setInterval: fakeSetInterval,
+    clearInterval: fakeClearInterval,
     queueMicrotask,
     require(id) {
       if (id === 'electron') return electron;
@@ -224,13 +297,34 @@ export function loadMainForTest({
     synchronizeMascotPassthrough: typeof synchronizeMascotPassthrough === 'function' ? synchronizeMascotPassthrough : undefined,
     setMascotWindow(value) { mascotWindow = value; },
     setSettingsWindow(value) { settingsWindow = value; },
+    toggleVisibility,
     getSettingsDirty() { return typeof settingsDirty === 'undefined' ? undefined : settingsDirty; },
     getPaused() { return paused; },
     setPaused,
+    runMascotWatchdog,
+    startMascotRecoveryMonitoring,
+    scheduleEnvironmentRecovery,
+    recordDiagnostic,
+    RECOVERY_TIMING,
+    createTray,
+    rebuildTrayMenu,
+    isMascotHiddenByUser() { return mascotHiddenByUser; },
   };`;
 
   const api = runScript(source, context, 'main.js');
-  return { api, handlers, ipcListeners, app, electron, context, browserWindows };
+  return {
+    api,
+    handlers,
+    ipcListeners,
+    app,
+    electron,
+    context,
+    browserWindows,
+    errorBoxes,
+    shownItems,
+    menus,
+    trayInstances,
+  };
 }
 
 export function loadPreloadForTest({ projectRoot, fileName = 'preload.js' } = {}) {
@@ -289,6 +383,7 @@ export function loadRendererForTest({
   ImageClass = class {},
 } = {}) {
   const { document, nodes } = createDomStub();
+  const projectRequire = createRequire(path.join(projectRoot, 'main.js'));
   const passthroughCalls = [];
   const storage = localStorageOverride || { getItem: () => null, setItem() {} };
   const windowObject = createWindowEventTarget({
@@ -300,11 +395,14 @@ export function loadRendererForTest({
     mascotAPI: {
       setMousePassthrough(value) { passthroughCalls.push(value); },
       onCommand() {},
+      reportDiagnostic() {},
       loadConfig: async () => ({ config: { mascot: {}, actions: [] } }),
       resolveAsset: async () => null,
       reportApplyResult() {},
       ...mascotAPIOverride,
     },
+    DesktopMascotConfigRules: projectRequire('./shared/config-rules'),
+    DesktopMascotConcurrency: projectRequire('./shared/concurrency'),
   });
   const vmMath = Object.create(Math);
   vmMath.random = random;
@@ -333,9 +431,11 @@ export function loadRendererForTest({
     axisMovementBounds,
     movementBounds,
     clampPosition,
+    ensureMascotVisible,
     renderPosition: typeof renderPosition === 'function' ? renderPosition : undefined,
     configuredStartPosition,
     setMousePassthrough,
+    applyFlip,
     pointIsInsideMascot,
     savePosition,
     setPosition,
@@ -346,6 +446,7 @@ export function loadRendererForTest({
     clearEffects: typeof clearEffects === 'function' ? clearEffects : undefined,
     reloadConfig,
     updateMotion,
+    failedActionIds,
   };`;
 
   const api = runScript(source, context, 'renderer.js');
@@ -364,6 +465,8 @@ export function loadSettingsForTest({
   mascotAPI: mascotAPIOverride = {},
   ImageClass = class {},
   provideMascotAPI = true,
+  provideConfigRules = true,
+  provideConcurrency = true,
   runBoot = false,
   now = () => Date.now(),
 } = {}) {
@@ -404,6 +507,15 @@ export function loadSettingsForTest({
   };
   if (provideMascotAPI) windowBase.mascotAPI = mascotAPI;
   const windowObject = createWindowEventTarget(windowBase);
+  if (provideConfigRules || provideConcurrency) {
+    const projectRequire = createRequire(path.join(projectRoot, 'main.js'));
+    if (provideConfigRules) {
+      windowObject.DesktopMascotConfigRules = projectRequire('./shared/config-rules');
+    }
+    if (provideConcurrency) {
+      windowObject.DesktopMascotConcurrency = projectRequire('./shared/concurrency');
+    }
+  }
   const context = {
     console,
     document,
@@ -448,6 +560,17 @@ export function loadSettingsForTest({
     endOperation: typeof endOperation === 'function' ? endOperation : undefined,
     addAction: typeof addAction === 'function' ? addAction : undefined,
     renderActionList: typeof renderActionList === 'function' ? renderActionList : undefined,
+    renderEditor: typeof renderEditor === 'function' ? renderEditor : undefined,
+    openImageEditor: typeof openImageEditor === 'function' ? openImageEditor : undefined,
+    fitActionIntoFrame: typeof fitActionIntoFrame === 'function' ? fitActionIntoFrame : undefined,
+    computeClipping: typeof computeClipping === 'function' ? computeClipping : undefined,
+    measurementForTransform: typeof measurementForTransform === 'function'
+      ? measurementForTransform
+      : undefined,
+    fitTransformToFrame: typeof fitTransformToFrame === 'function' ? fitTransformToFrame : undefined,
+    getActionMeasurement: typeof getActionMeasurement === 'function' ? getActionMeasurement : undefined,
+    requestVisibleContentMeasurements: typeof requestVisibleContentMeasurements === 'function' ? requestVisibleContentMeasurements : undefined,
+    actionMeasurements: typeof actionMeasurements === 'undefined' ? undefined : actionMeasurements,
     updateActionName: typeof updateActionName === 'function' ? updateActionName : undefined,
     mapWithConcurrency: typeof mapWithConcurrency === 'function' ? mapWithConcurrency : undefined,
     measureVisibleContent,
