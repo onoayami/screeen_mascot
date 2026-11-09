@@ -195,7 +195,16 @@ test('image signatures read only a 64 KB head except for GIF', async () => {
     const probesToCheck = [
       ['large.png', Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(payloadSize)])],
       ['large.jpg', Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(payloadSize)])],
-      ['large.webp', Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.alloc(payloadSize)])],
+      ['large.webp', (() => {
+        const content = Buffer.alloc(20 + payloadSize);
+        content.write('RIFF', 0);
+        content.writeUInt32LE(content.length - 8, 4);
+        content.write('WEBP', 8);
+        content.write('VP8L', 12);
+        content.writeUInt32LE(payloadSize, 16);
+        content[20] = 0x2f;
+        return content;
+      })()],
       ['large.svg', Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg"></svg>${' '.repeat(payloadSize)}`)],
     ];
 
@@ -382,7 +391,7 @@ test('configuration recovery keeps only the five newest recovery snapshots', asy
 
     const recovered = main.api.recoverEditableConfig('defaults');
     const recoveryFiles = fs.readdirSync(userCharacters)
-      .filter((name) => /^config\.recovery-\d+\.json$/.test(name))
+      .filter((name) => /^config\.recovery-\d+(?:-[0-9a-f]{8})?\.json$/i.test(name))
       .sort((left, right) => Number(left.match(/recovery-(\d+)/)[1]) - Number(right.match(/recovery-(\d+)/)[1]));
 
     assert.equal(recovered.ok, true);

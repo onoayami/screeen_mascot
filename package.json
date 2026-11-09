@@ -26,6 +26,7 @@
     "test:release-c": "node --test tests/release-c/*.test.mjs",
     "test:release-d": "node --test tests/release-d/*.test.mjs",
     "test:automated": "npm run check && npm run test:phase0:harness && npm run test:phase0:known-defects && npm run test:release-a1 && npm run test:release-a2 && npm run test:release-a3 && npm run test:release-b && npm run test:release-c && npm run test:release-d",
+    "test:automated:local": "node scripts/run-automated-tests.mjs",
     "check:build-lock": "node scripts/check-build-lock.js"
   },
   "devDependencies": {

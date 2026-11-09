@@ -32,6 +32,8 @@ export function loadMainForTest({
   const trayInstances = [];
   const screenListeners = new Map();
   const powerMonitorListeners = new Map();
+  const appListeners = new Map();
+  const quitState = { calls: 0, completed: 0 };
   const projectRequire = createRequire(path.join(projectRoot, 'main.js'));
   const wrappedFs = new Proxy(fs, {
     get(target, property) {
@@ -44,10 +46,32 @@ export function loadMainForTest({
   const app = {
     isPackaged: false,
     requestSingleInstanceLock: () => true,
-    quit() {},
+    quit() {
+      quitState.calls += 1;
+      const event = {
+        defaultPrevented: false,
+        preventDefault() { this.defaultPrevented = true; },
+      };
+      app.emit('before-quit', event);
+      if (event.defaultPrevented) return false;
+      let allWindowsClosed = true;
+      for (const window of [...browserWindows].reverse()) {
+        if (!window.isDestroyed() && !window.close()) allWindowsClosed = false;
+      }
+      if (!allWindowsClosed) return false;
+      quitState.completed += 1;
+      app.emit('will-quit');
+      return true;
+    },
     getPath: () => userDataRoot,
     whenReady: () => new Promise(() => {}),
-    on() {},
+    on(type, listener) {
+      if (!appListeners.has(type)) appListeners.set(type, []);
+      appListeners.get(type).push(listener);
+    },
+    emit(type, ...args) {
+      for (const listener of appListeners.get(type) || []) listener(...args);
+    },
     ...appOverrides,
   };
 
@@ -282,11 +306,15 @@ export function loadMainForTest({
     validateAndNormalizeConfig,
     writeConfigAtomic,
     loadNormalizedConfig,
+    loadMascotRuntimeConfig: typeof loadMascotRuntimeConfig === 'function' ? loadMascotRuntimeConfig : undefined,
     loadEditableConfig: typeof loadEditableConfig === 'function' ? loadEditableConfig : undefined,
     recoverEditableConfig: typeof recoverEditableConfig === 'function' ? recoverEditableConfig : undefined,
     hashNormalizedConfig: typeof hashNormalizedConfig === 'function' ? hashNormalizedConfig : undefined,
     getCharacterAssetMetadata: typeof getCharacterAssetMetadata === 'function' ? getCharacterAssetMetadata : undefined,
     importImageFromPath,
+    discardImportedImage: typeof discardImportedImage === 'function' ? discardImportedImage : undefined,
+    publishImageTemporary: typeof publishImageTemporary === 'function' ? publishImageTemporary : undefined,
+    uniqueDestination: typeof uniqueDestination === 'function' ? uniqueDestination : undefined,
     saveTransparentPng,
     openSettingsWindow,
     createMascotWindow,
@@ -305,6 +333,9 @@ export function loadMainForTest({
     startMascotRecoveryMonitoring,
     scheduleEnvironmentRecovery,
     recordDiagnostic,
+    flushDiagnosticsSync: typeof flushDiagnosticsSync === 'function' ? flushDiagnosticsSync : undefined,
+    flushDiagnostics: typeof flushDiagnostics === 'function' ? flushDiagnostics : undefined,
+    droppedPathTokens: typeof droppedPathTokens === 'undefined' ? undefined : droppedPathTokens,
     RECOVERY_TIMING,
     createTray,
     rebuildTrayMenu,
@@ -312,6 +343,10 @@ export function loadMainForTest({
   };`;
 
   const api = runScript(source, context, 'main.js');
+  const diagnosticFlushRegistry = globalThis.__phase0DiagnosticFlushRegistry
+    || (globalThis.__phase0DiagnosticFlushRegistry = new Map());
+  if (!diagnosticFlushRegistry.has(projectRoot)) diagnosticFlushRegistry.set(projectRoot, new Set());
+  diagnosticFlushRegistry.get(projectRoot).add(api.flushDiagnostics);
   return {
     api,
     handlers,
@@ -319,6 +354,7 @@ export function loadMainForTest({
     app,
     electron,
     context,
+    quitState,
     browserWindows,
     errorBoxes,
     shownItems,
@@ -441,12 +477,14 @@ export function loadRendererForTest({
     setPosition,
     setAction,
     displayAction: typeof displayAction === 'function' ? displayAction : undefined,
+    handleMascotImageError: typeof handleMascotImageError === 'function' ? handleMascotImageError : undefined,
     mapWithConcurrency: typeof mapWithConcurrency === 'function' ? mapWithConcurrency : undefined,
     createEffect: typeof createEffect === 'function' ? createEffect : undefined,
     clearEffects: typeof clearEffects === 'function' ? clearEffects : undefined,
     reloadConfig,
     updateMotion,
     failedActionIds,
+    resolveAction: typeof resolveAction === 'function' ? resolveAction : undefined,
   };`;
 
   const api = runScript(source, context, 'renderer.js');
@@ -463,12 +501,15 @@ export function loadRendererForTest({
 export function loadSettingsForTest({
   projectRoot,
   mascotAPI: mascotAPIOverride = {},
+  consoleObject = console,
   ImageClass = class {},
   provideMascotAPI = true,
   provideConfigRules = true,
   provideConcurrency = true,
   runBoot = false,
   now = () => Date.now(),
+  requestAnimationFrame = (callback) => setTimeout(() => callback(now()), 0),
+  cancelAnimationFrame = clearTimeout,
 } = {}) {
   const { document, nodes } = createDomStub();
   const defaultConfig = {
@@ -487,6 +528,7 @@ export function loadSettingsForTest({
     resolveAsset: async (relativePath) => `file://${relativePath}`,
     chooseImage: async () => null,
     importImage: async () => null,
+    discardImportedImage: async () => false,
     saveTransparentPng: async () => null,
     getPathForFile: () => '',
     getAppInfo: async () => ({ isPackaged: false }),
@@ -501,8 +543,8 @@ export function loadSettingsForTest({
     location: { href: 'file:///settings.html' },
     clearTimeout,
     setTimeout,
-    requestAnimationFrame: (callback) => setTimeout(callback, 0),
-    cancelAnimationFrame: clearTimeout,
+    requestAnimationFrame,
+    cancelAnimationFrame,
     confirm: () => true,
   };
   if (provideMascotAPI) windowBase.mascotAPI = mascotAPI;
@@ -517,7 +559,7 @@ export function loadSettingsForTest({
     }
   }
   const context = {
-    console,
+    console: consoleObject,
     document,
     window: windowObject,
     URL,
@@ -549,18 +591,55 @@ export function loadSettingsForTest({
     state,
     elements,
     loadConfiguration,
+    recoverConfiguration,
     setBusy,
     markDirty,
     markSaved,
     markLoaded: typeof markLoaded === 'function' ? markLoaded : undefined,
     serializeConfig,
     saveConfiguration,
+    saveSelectedAction,
+    isSelectedActionPending,
+    applyDurationBulk,
+    readBulkDuration: typeof readBulkDuration === 'function' ? readBulkDuration : undefined,
+    readBulkSpeed: typeof readBulkSpeed === 'function' ? readBulkSpeed : undefined,
+    stepMovementPreview: typeof stepMovementPreview === 'function' ? stepMovementPreview : undefined,
+    startMovementSpeedPreview: typeof startMovementSpeedPreview === 'function' ? startMovementSpeedPreview : undefined,
+    stopMovementSpeedPreview: typeof stopMovementSpeedPreview === 'function' ? stopMovementSpeedPreview : undefined,
+    movementPreviewState: () => ({
+      frame: movementPreviewFrame,
+      running: movementPreviewRunning,
+      position: movementPreviewPosition,
+      direction: movementPreviewDirection,
+      actionId: movementPreviewActionId,
+    }),
     prepareDistributionDefaults,
     beginOperation: typeof beginOperation === 'function' ? beginOperation : undefined,
     endOperation: typeof endOperation === 'function' ? endOperation : undefined,
     addAction: typeof addAction === 'function' ? addAction : undefined,
+    importImage: typeof importImage === 'function' ? importImage : undefined,
+    prepareImportedImage: typeof prepareImportedImage === 'function' ? prepareImportedImage : undefined,
+    discardUnreferencedImportedImage: typeof discardUnreferencedImportedImage === 'function'
+      ? discardUnreferencedImportedImage
+      : undefined,
+    makeTransparentImageData: typeof makeTransparentImageData === 'function'
+      ? makeTransparentImageData
+      : undefined,
     renderActionList: typeof renderActionList === 'function' ? renderActionList : undefined,
+    updateActionListSelection: typeof updateActionListSelection === 'function'
+      ? updateActionListSelection
+      : undefined,
+    refreshClippingIndicators: typeof refreshClippingIndicators === 'function'
+      ? refreshClippingIndicators
+      : undefined,
+    actionCardViews: typeof actionCardViews === 'undefined' ? undefined : actionCardViews,
+    actionMeasurementKey: typeof actionMeasurementKey === 'function' ? actionMeasurementKey : undefined,
+    updateActionCardClipping: typeof updateActionCardClipping === 'function'
+      ? updateActionCardClipping
+      : undefined,
     renderEditor: typeof renderEditor === 'function' ? renderEditor : undefined,
+    refreshPreviewGeometry: typeof refreshPreviewGeometry === 'function' ? refreshPreviewGeometry : undefined,
+    previewFitRatio: typeof previewFitRatio === 'function' ? previewFitRatio : undefined,
     openImageEditor: typeof openImageEditor === 'function' ? openImageEditor : undefined,
     fitActionIntoFrame: typeof fitActionIntoFrame === 'function' ? fitActionIntoFrame : undefined,
     computeClipping: typeof computeClipping === 'function' ? computeClipping : undefined,

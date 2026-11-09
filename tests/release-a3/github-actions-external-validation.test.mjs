@@ -33,9 +33,17 @@ test('A3-18: GitHub Actions covers deterministic source packaging and native OS 
   assert.match(source, /actions\/download-artifact@v4/);
 });
 
-test('A3-19: macOS CI records an exact dependency candidate and runs every automated suite', () => {
+test('A3-19: fixed dependencies are validated by default and latest is opt-in', () => {
   const source = workflowSource();
+  assert.match(source, /npm run check:build-lock/);
+  assert.match(source, /npm ci/);
+  assert.match(source, /electron-latest-compatibility:/);
+  assert.match(source, /inputs\.electron_latest_compat == true/);
+  assert.match(source, /continue-on-error:\s*true/);
   assert.match(source, /npm install[^\n]*--package-lock-only[^\n]*--ignore-scripts[^\n]*--save-exact[^\n]*electron@latest[^\n]*electron-builder@latest/);
+  assert.match(source, /node -p "require\('\.\/package\.json'\)\.version"/);
+  assert.match(source, /SOURCE_ARCHIVE=desktop-mascot-ui-v\$\{version\}-external-validation\.zip/);
+  assert.match(source, /SOURCE_ROOT=desktop-mascot-ui-v\$\{version\}/);
   assert.match(source, /check:build-lock/);
   assert.match(source, /test:automated/);
   assert.match(source, /playwright install chromium/);
@@ -43,6 +51,20 @@ test('A3-19: macOS CI records an exact dependency candidate and runs every autom
   assert.match(source, /CSC_IDENTITY_AUTO_DISCOVERY=false/);
   assert.match(source, /build:mac:universal/);
   assert.match(source, /hdiutil verify/);
+
+  const fixedMacJob = source.split('  macos-native-extraction-and-build:')[1]?.split(
+    '  electron-latest-compatibility:',
+  )[0];
+  const optionalLatestJob = source.split('  electron-latest-compatibility:')[1];
+  assert.ok(fixedMacJob, 'fixed macOS validation job is missing');
+  assert.ok(optionalLatestJob, 'optional latest compatibility job is missing');
+  const macArtifactStep = fixedMacJob.indexOf('- name: Upload macOS evidence and unsigned artifacts');
+  const fixedBuildStep = fixedMacJob.indexOf('env CSC_IDENTITY_AUTO_DISCOVERY=false npm run build:mac:universal');
+  assert.ok(macArtifactStep > fixedBuildStep, 'macOS evidence upload must follow the fixed build');
+  assert.match(fixedMacJob.slice(macArtifactStep), /name:\s*macos-validation-evidence/);
+  assert.match(fixedMacJob.slice(macArtifactStep), /macos-validation/);
+  assert.match(fixedMacJob.slice(macArtifactStep), /macos-candidate\/dist/);
+  assert.doesNotMatch(optionalLatestJob, /Upload macOS evidence and unsigned artifacts/);
 
   const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
   for (const name of ['test:release-b', 'test:release-c', 'test:release-d', 'test:automated']) {

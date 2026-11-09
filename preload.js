@@ -16,6 +16,9 @@ contextBridge.exposeInMainWorld('mascotAPI', {
   getAssetMetadata(relativePath) {
     return ipcRenderer.invoke('mascot:get-asset-metadata', relativePath);
   },
+  discardImportedImage(relativePath, category) {
+    return ipcRenderer.invoke('mascot:discard-imported-image', relativePath, category);
+  },
   chooseImage(category) {
     return ipcRenderer.invoke('mascot:choose-image', category);
   },
@@ -29,9 +32,12 @@ contextBridge.exposeInMainWorld('mascotAPI', {
       originalName,
     });
   },
-  getPathForFile(file) {
+  async getPathForFile(file) {
     try {
-      return webUtils.getPathForFile(file);
+      const filePath = webUtils.getPathForFile(file);
+      return filePath
+        ? await ipcRenderer.invoke('mascot:register-dropped-path', filePath)
+        : '';
     } catch (_error) {
       return '';
     }

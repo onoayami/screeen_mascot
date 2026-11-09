@@ -6,6 +6,7 @@ const SAFE_EDGE_INSET = 12;
 const IMAGE_DECODE_CONCURRENCY = 4;
 const MAX_EFFECTS = 100;
 const DEFAULT_DURATION_MS = window.DesktopMascotConfigRules.DEFAULT_DURATION_MS;
+const MAX_IMAGE_PIXELS = window.DesktopMascotConfigRules.MAX_IMAGE_PIXELS;
 const mapWithConcurrency = window.DesktopMascotConcurrency.mapWithConcurrency;
 const failedActionIds = new Set();
 
@@ -30,6 +31,7 @@ const state = {
   lastVisibilityCheckAt: 0,
   pointerPosition: null,
   effectEntries: [],
+  unavailableActionNames: [],
 };
 
 function showStatus(message) {
@@ -306,9 +308,19 @@ function randomX() {
 function applyActionImageTransform(action) {
   const transform = action?.imageTransform || {};
   const flipX = transform.flipX === true ? -1 : 1;
-  const scale = Math.min(3, Math.max(0.3, Number(transform.scale) || 1));
-  const offsetX = Math.min(100, Math.max(-100, Number(transform.offsetX) || 0));
-  const offsetY = Math.min(100, Math.max(-100, Number(transform.offsetY) || 0));
+  const { imageScale, imageOffset } = window.DesktopMascotConfigRules.CONFIG_RULES;
+  const scale = Math.min(
+    imageScale.maximum,
+    Math.max(imageScale.minimum, Number(transform.scale) || 1),
+  );
+  const offsetX = Math.min(
+    imageOffset.maximum,
+    Math.max(imageOffset.minimum, Number(transform.offsetX) || 0),
+  );
+  const offsetY = Math.min(
+    imageOffset.maximum,
+    Math.max(imageOffset.minimum, Number(transform.offsetY) || 0),
+  );
   mascotImage.style.setProperty('--image-base-flip-x', String(flipX));
   mascotImage.style.setProperty('--image-scale', String(scale));
   mascotImage.style.setProperty('--image-offset-x', `${offsetX}%`);
@@ -421,7 +433,6 @@ function displayAction(action, now = performance.now(), timeoutMs = 6000) {
 }
 
 function verifyImageAsset(assetUrl, label) {
-  const maxImagePixels = 16_000_000;
   return new Promise((resolve, reject) => {
     const image = new Image();
     const timer = window.setTimeout(() => {
@@ -432,7 +443,7 @@ function verifyImageAsset(assetUrl, label) {
 
     image.onload = () => {
       window.clearTimeout(timer);
-      if (image.naturalWidth * image.naturalHeight > maxImagePixels) {
+      if (image.naturalWidth * image.naturalHeight > MAX_IMAGE_PIXELS) {
         reject(new Error(`「${label}」の画像は16MP以下にしてください。`));
         return;
       }
@@ -446,20 +457,57 @@ function verifyImageAsset(assetUrl, label) {
   });
 }
 
-async function resolveAction(action) {
-  const assetUrl = await window.mascotAPI.resolveAsset(action.file);
-  if (!assetUrl) throw new Error(`「${action.name || '動作'}」の画像が見つかりません。`);
-  await verifyImageAsset(assetUrl, action.name || '動作');
+async function resolveAction(action, index) {
+  if (
+    !action
+    || typeof action !== 'object'
+    || typeof action.file !== 'string'
+    || action.file.trim() === ''
+  ) {
+    throw new Error('動作の画像設定が正しくありません。');
+  }
+  if (action.effect && typeof action.effect !== 'object') {
+    throw new Error('動作のエフェクト設定が正しくありません。');
+  }
+  let assetUrl;
+  assetUrl = await window.mascotAPI.resolveAsset(action.file);
+  if (!assetUrl) {
+    const error = new Error(`「${action.name || '動作'}」の画像が見つかりません。`);
+    error.assetResolutionFailure = true;
+    throw error;
+  }
+  try {
+    await verifyImageAsset(assetUrl, action.name || '動作');
+  } catch (error) {
+    const assetError = error instanceof Error ? error : new Error(String(error));
+    assetError.assetResolutionFailure = true;
+    throw assetError;
+  }
 
   let effect = null;
   if (action.effect?.file) {
     const effectAssetUrl = await window.mascotAPI.resolveAsset(action.effect.file);
-    if (!effectAssetUrl) throw new Error(`「${action.name || '動作'}」のエフェクト画像が見つかりません。`);
-    await verifyImageAsset(effectAssetUrl, `${action.name || '動作'}のエフェクト`);
+    if (!effectAssetUrl) {
+      const error = new Error(`「${action.name || '動作'}」のエフェクト画像が見つかりません。`);
+      error.assetResolutionFailure = true;
+      throw error;
+    }
+    try {
+      await verifyImageAsset(effectAssetUrl, `${action.name || '動作'}のエフェクト`);
+    } catch (error) {
+      const assetError = error instanceof Error ? error : new Error(String(error));
+      assetError.assetResolutionFailure = true;
+      throw assetError;
+    }
     effect = { ...action.effect, assetUrl: effectAssetUrl };
   }
 
-  return { ...action, assetUrl, effect };
+  return {
+    ...action,
+    _uiId: action._uiId ?? `runtime-${state.reloadGeneration}-${index}`,
+    assetUrl,
+    effect,
+  };
 }
 
 async function reloadConfig({
@@ -469,7 +517,12 @@ async function reloadConfig({
 } = {}) {
   const reloadGeneration = ++state.reloadGeneration;
   try {
-    const { config, configHash } = await window.mascotAPI.loadConfig();
+    const {
+      config,
+      configHash,
+      assetsIncomplete: responseAssetsIncomplete = false,
+    } = await window.mascotAPI.loadConfig();
+    const assetsIncomplete = responseAssetsIncomplete === true || config?.assetsIncomplete === true;
     if (!config || !Array.isArray(config.actions) || config.actions.length === 0) {
       throw new Error('config.json の actions が空です。');
     }
@@ -478,18 +531,46 @@ async function reloadConfig({
     }
 
     clearEffects();
-    const resolvedActions = await mapWithConcurrency(
+    const resolutionResults = await mapWithConcurrency(
       config.actions,
       IMAGE_DECODE_CONCURRENCY,
-      resolveAction,
+      async (action, index) => {
+        try {
+          return await resolveAction(action, index);
+        } catch (error) {
+          if (!error?.assetResolutionFailure) throw error;
+          return { error };
+        }
+      },
     );
     if (reloadGeneration !== state.reloadGeneration) {
       return { ok: false, superseded: true, error: 'より新しい設定の読み込みを優先しました。' };
+    }
+    const resolvedActions = [];
+    const resolvedBySourceIndex = [];
+    const unavailableActionNames = [];
+    let firstResolutionError = null;
+    for (let index = 0; index < resolutionResults.length; index += 1) {
+      const result = resolutionResults[index];
+      if (result && typeof result === 'object' && 'error' in result) {
+        firstResolutionError ||= result.error;
+        unavailableActionNames.push(config.actions[index].name || `動作${index + 1}`);
+      } else {
+        resolvedActions.push(result);
+        resolvedBySourceIndex[index] = result;
+      }
+    }
+    if (resolvedActions.length === 0) {
+      throw firstResolutionError || new Error('表示できる動作がありません。');
+    }
+    if (expectedConfigHash && (unavailableActionNames.length > 0 || assetsIncomplete)) {
+      throw firstResolutionError || new Error('保存した設定の画像をすべて表示できません。');
     }
 
     failedActionIds.clear();
     state.config = config;
     state.actions = resolvedActions;
+    state.unavailableActionNames = unavailableActionNames;
     renderMascotSize();
 
     const preserved = keepPosition && state.currentAction ? state.position : null;
@@ -499,23 +580,31 @@ async function reloadConfig({
       preserved?.y ?? saved?.y ?? configuredStartPosition().y,
     );
     renderPosition();
-
     const preferredAction = Number.isInteger(preferredActionIndex)
       && preferredActionIndex >= 0
-      && preferredActionIndex < resolvedActions.length
-      ? resolvedActions[preferredActionIndex]
+      && preferredActionIndex < resolutionResults.length
+      ? resolvedBySourceIndex[preferredActionIndex]
       : null;
     const nextAction = preferredAction || chooseWeightedAction();
     await displayAction(nextAction);
     if (reloadGeneration !== state.reloadGeneration) {
       return { ok: false, superseded: true, error: 'より新しい設定の読み込みを優先しました。' };
     }
-    clearStatus();
+    if (unavailableActionNames.length > 0 || assetsIncomplete) {
+      showStatus(
+        `一部の画像を表示できません：${unavailableActionNames.join('、') || '画像の確認が必要です'}`,
+      );
+    } else {
+      clearStatus();
+    }
     return {
       ok: true,
-      appliedHash: configHash || null,
+      partial: unavailableActionNames.length > 0 || assetsIncomplete,
+      appliedHash: unavailableActionNames.length > 0 || assetsIncomplete
+        ? null
+        : (configHash || null),
       actionName: nextAction?.name || null,
-      actionIndex: resolvedActions.indexOf(nextAction),
+      actionIndex: resolvedBySourceIndex.indexOf(nextAction),
     };
   } catch (error) {
     const message = error?.message || String(error);
@@ -532,7 +621,9 @@ function updateMotion(now, deltaSeconds) {
   if (state.paused || state.isDragging || !state.currentAction) return;
 
   if (now >= state.nextActionAt) {
-    setAction(chooseWeightedAction(), now);
+    const nextAction = chooseWeightedAction();
+    if (nextAction) setAction(nextAction, now);
+    else state.nextActionAt = now + 1000;
   }
 
   const movementType = state.currentAction.movement?.type || 'still';
@@ -689,14 +780,25 @@ mascotElement.addEventListener('mouseleave', (event) => {
 function handleMascotImageError() {
   if (state.currentAction) failedActionIds.add(state.currentAction._uiId);
   window.mascotAPI.reportDiagnostic?.('image-load-failed');
-  showStatus('画像を表示できません。🪼メニューから画像・設定フォルダを確認してください。');
+  showStatus(state.unavailableActionNames.length > 0
+    ? `画像を表示できません：${state.unavailableActionNames.join('、')}`
+    : '画像を表示できません。🪼メニューから画像・設定フォルダを確認してください。');
   const nextAction = chooseWeightedAction();
   if (nextAction) setAction(nextAction);
+  else state.nextActionAt = performance.now() + 1000;
 }
 
 mascotImage.addEventListener('load', () => {
   if (state.currentAction) failedActionIds.delete(state.currentAction._uiId);
-  clearStatus();
+  if (state.unavailableActionNames.length > 0) {
+    showStatus(`一部の画像を表示できません：${state.unavailableActionNames.join('、')}`);
+  } else {
+    if (state.config?.assetsIncomplete) {
+      showStatus('一部の画像を表示できません：画像の確認が必要です');
+    } else {
+      clearStatus();
+    }
+  }
   setPosition(state.position.x, state.position.y);
 });
 mascotImage.addEventListener('error', handleMascotImageError);

@@ -36,7 +36,7 @@ function collectTextFiles(root) {
   const files = [];
   const walk = (directory) => {
     const entries = fs.readdirSync(directory, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right));
+      .sort((left, right) => left.name.localeCompare(right.name));
     for (const entry of entries) {
       if (entry.isDirectory() && EXCLUDED_DIRECTORIES.has(entry.name)) continue;
       const filePath = path.join(directory, entry.name);

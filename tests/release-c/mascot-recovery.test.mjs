@@ -97,12 +97,18 @@ test('renderer crashes and main-frame load failures trigger bounded recovery', a
     window.webContents.emit('did-fail-load', {}, -3, 'failed', '', true);
     assert.equal(main.errorBoxes.length, 0);
     window.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
+    assert.equal(main.errorBoxes.length, 0);
+    window.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
     assert.equal(main.errorBoxes.length, 1);
     assert.equal(window.webContents.reloadCount, 1);
 
     window.webContents.emit('did-finish-load');
     window.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
-    const cooldownTimer = timers.timeouts.at(-1);
+    const cooldownTimer = timers.timeouts.find((timer) => (
+      timer.unreferenced
+      && timer.delay > 0
+      && timer.delay <= main.api.RECOVERY_TIMING.rendererReloadCooldownMs
+    ));
     assert.ok(
       cooldownTimer.delay > 0
       && cooldownTimer.delay <= main.api.RECOVERY_TIMING.rendererReloadCooldownMs,
@@ -113,6 +119,96 @@ test('renderer crashes and main-frame load failures trigger bounded recovery', a
     assert.equal(main.errorBoxes.length, 1);
     window.webContents.emit('render-process-gone', {}, { reason: 'crashed' });
     assert.equal(main.errorBoxes.length, 2);
+  });
+});
+
+test('aborted main-frame loads are ignored and other load errors are diagnosed', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const { main } = loadMain(projectRoot, userDataRoot);
+    main.api.createMascotWindow();
+    const window = main.browserWindows.at(-1);
+    window.webContents.emit('did-fail-load', {}, -3, 'aborted', '', true);
+    main.api.flushDiagnosticsSync();
+    assert.equal(window.webContents.reloadCount, 0);
+    const logPath = path.join(userDataRoot, 'mascot-diagnostics.log');
+    assert.equal(fs.existsSync(logPath), false);
+
+    window.webContents.emit('did-fail-load', {}, -2, 'failed', '', true);
+    main.api.flushDiagnosticsSync();
+    const entries = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.ok(entries.some((entry) => entry.event === 'did-fail-load' && entry.errorCode === -2));
+    assert.equal(window.webContents.reloadCount, 1);
+  });
+});
+
+test('diagnostic batches flush in order and pending entries are written before quit', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const { main } = loadMain(projectRoot, userDataRoot);
+    const logPath = path.join(userDataRoot, 'mascot-diagnostics.log');
+    main.api.recordDiagnostic('batch-one');
+    main.api.recordDiagnostic('batch-two');
+    assert.equal(fs.existsSync(logPath), false);
+    assert.equal(await main.api.flushDiagnostics(), true);
+    assert.deepEqual(
+      fs.readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line).event),
+      ['batch-one', 'batch-two'],
+    );
+
+    main.api.recordDiagnostic('pending-at-quit');
+    main.app.quit();
+    const events = fs.readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line).event);
+    assert.equal(events.filter((event) => event === 'pending-at-quit').length, 1);
+    assert.ok(events.includes('before-quit'));
+    assert.ok(events.includes('app-quit'));
+  });
+});
+
+test('pointer synchronization suppresses duplicates but keeps a recovery heartbeat', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    let cursor = { x: 110, y: 220 };
+    const { main } = loadMain(projectRoot, userDataRoot, createFakeTimers(), {
+      screenOverrides: { getCursorScreenPoint: () => cursor },
+    });
+    let now = 1000;
+    main.context.Date = class TestDate extends Date {
+      static now() { return now; }
+    };
+    main.api.createMascotWindow();
+    const window = main.browserWindows.at(-1);
+    const countSyncCommands = () => window.webContents.sent.filter(
+      ({ payload }) => payload?.command === 'sync-pointer-position',
+    ).length;
+
+    main.api.synchronizeMascotPassthrough();
+    assert.equal(countSyncCommands(), 1);
+    main.api.synchronizeMascotPassthrough();
+    assert.equal(countSyncCommands(), 1);
+
+    cursor = { x: 111, y: 220 };
+    main.api.synchronizeMascotPassthrough();
+    assert.equal(countSyncCommands(), 2);
+    now += 5000;
+    main.api.synchronizeMascotPassthrough();
+    assert.equal(countSyncCommands(), 3);
+
+    window.webContents.emit('did-finish-load');
+    assert.equal(countSyncCommands(), 4);
+  });
+});
+
+test('screen recovery attaches only one pending did-finish-load notification', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const { main } = loadMain(projectRoot, userDataRoot);
+    main.api.createMascotWindow();
+    const window = main.browserWindows.at(-1);
+    window.webContents.loading = true;
+    main.api.ensureMascotWindowOnScreen();
+    main.api.ensureMascotWindowOnScreen({ centerMascot: true });
+    const pending = window.webContents.listeners.get('did-finish-load')
+      .filter((entry) => entry.once);
+    assert.equal(pending.length, 1);
+    window.webContents.emit('did-finish-load');
+    assert.equal(window.webContents.listeners.get('did-finish-load').some((entry) => entry.once), false);
   });
 });
 
@@ -178,6 +274,7 @@ test('watchdog backs off repeated repairs by kind and resumes after the cooldown
     window.setBounds(offscreenBounds);
     assert.equal(main.api.runMascotWatchdog('repeated-bounds-test'), false);
     assert.deepEqual(window.getBounds(), offscreenBounds);
+    main.api.flushDiagnosticsSync();
     let entries = fs.readFileSync(path.join(userDataRoot, 'mascot-diagnostics.log'), 'utf8')
       .trim()
       .split('\n')
@@ -213,6 +310,7 @@ test('watchdog backs off repeated repairs by kind and resumes after the cooldown
     assert.equal(main.api.runMascotWatchdog('unrelated-repair-test'), true);
     assert.deepEqual(window.getBounds(), offscreenBounds);
     assert.equal(window.isAlwaysOnTop(), true);
+    main.api.flushDiagnosticsSync();
     entries = fs.readFileSync(path.join(userDataRoot, 'mascot-diagnostics.log'), 'utf8')
       .trim()
       .split('\n')
@@ -250,19 +348,14 @@ test('watchdog backs off repeated repairs by kind and resumes after the cooldown
 
 test('watchdog treats subpixel work-area differences as a match without logging', async () => {
   await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
-    const writes = [];
-    const { main, display } = loadMain(projectRoot, userDataRoot, undefined, {
-      fsOverrides: {
-        appendFileSync(...args) {
-          writes.push(args);
-          return fs.appendFileSync(...args);
-        },
-      },
-    });
+    const { main, display } = loadMain(projectRoot, userDataRoot);
     main.api.createMascotWindow();
     const window = main.browserWindows.at(-1);
+    await main.api.flushDiagnostics();
+    const logPath = path.join(userDataRoot, 'mascot-diagnostics.log');
+    const readLog = () => fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+    const logBeforeWatchdog = readLog();
     window.setBounds({ x: 0.5, y: 0.5, width: 799.5, height: 559.5 });
-    const writesBeforeWatchdog = writes.length;
 
     assert.equal(main.api.runMascotWatchdog('subpixel-bounds-test'), false);
     assert.deepEqual(window.getBounds(), {
@@ -271,12 +364,15 @@ test('watchdog treats subpixel work-area differences as a match without logging'
       width: 799.5,
       height: 559.5,
     });
-    assert.equal(writes.length, writesBeforeWatchdog);
+    await main.api.flushDiagnostics();
+    assert.equal(readLog(), logBeforeWatchdog);
 
     window.setBounds({ ...display.workArea, x: display.workArea.x + 1 });
     assert.equal(main.api.runMascotWatchdog('one-pixel-bounds-test'), true);
     assert.deepEqual(window.getBounds(), display.workArea);
-    assert.equal(writes.length, writesBeforeWatchdog + 1);
+    await main.api.flushDiagnostics();
+    const entries = readLog().trim().split('\n').map(JSON.parse);
+    assert.equal(entries.filter((entry) => entry.event === 'watchdog-repaired').length, 1);
   });
 });
 
@@ -284,7 +380,13 @@ test('diagnostic write failures warn without preventing window recovery', async 
   await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
     const { main } = loadMain(projectRoot, userDataRoot, undefined, {
       fsOverrides: {
-        appendFileSync() { throw new Error('disk full'); },
+        promises: new Proxy(fs.promises, {
+          get(target, property) {
+            if (property === 'open') return async () => { throw new Error('disk full'); };
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        }),
       },
     });
     main.api.createMascotWindow();
@@ -292,6 +394,7 @@ test('diagnostic write failures warn without preventing window recovery', async 
     window.setBounds({ x: 2400, y: 1400, width: 300, height: 300 });
 
     assert.doesNotThrow(() => main.api.runMascotWatchdog('write-failure-test'));
+    assert.equal(await main.api.flushDiagnostics(), false);
     assert.deepEqual(window.getBounds(), createDisplay().workArea);
   });
 });
@@ -417,6 +520,59 @@ test('image load errors move to another action and report sanitized renderer dia
   });
 });
 
+test('runtime action identities isolate failed images and retry empty action sets without spinning', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    class AutoLoadingImage {
+      constructor() {
+        this.naturalWidth = 1;
+        this.naturalHeight = 1;
+      }
+
+      set src(_value) {
+        this.onload?.();
+      }
+    }
+    const renderer = loadRendererForTest({
+      projectRoot,
+      ImageClass: AutoLoadingImage,
+      mascotAPI: { resolveAsset: async (file) => `file:///${file}` },
+    });
+    const first = await renderer.api.resolveAction({
+      name: 'first',
+      file: 'actions/first.svg',
+      movement: { type: 'still', speed: 0 },
+      durationMs: [6000, 10000],
+    }, 0);
+    const second = await renderer.api.resolveAction({
+      name: 'second',
+      file: 'actions/second.svg',
+      movement: { type: 'still', speed: 0 },
+      durationMs: [6000, 10000],
+    }, 1);
+    assert.notEqual(first._uiId, second._uiId);
+    renderer.api.state.config = { name: 'test', mascot: { size: 180 } };
+    renderer.api.state.actions = [first, second];
+    renderer.api.state.currentAction = first;
+    renderer.nodes.get('mascot-image').dispatchEvent({ type: 'error' });
+    assert.equal(renderer.api.state.currentAction, second);
+    assert.deepEqual([...renderer.api.failedActionIds], [first._uiId]);
+
+    renderer.api.state.currentAction = first;
+    renderer.nodes.get('mascot-image').dispatchEvent({ type: 'load' });
+    assert.equal(renderer.api.failedActionIds.has(first._uiId), false);
+
+    renderer.api.failedActionIds.add(first._uiId);
+    renderer.api.failedActionIds.add(second._uiId);
+    renderer.api.state.currentAction = second;
+    renderer.api.state.nextActionAt = 0;
+    renderer.api.updateMotion(100, 0.016);
+    assert.equal(renderer.api.state.nextActionAt, 1100);
+    renderer.api.updateMotion(500, 0.016);
+    assert.equal(renderer.api.state.nextActionAt, 1100);
+    assert.equal(renderer.api.chooseWeightedAction(), null);
+  });
+});
+
 test('diagnostic logs rotate at 1 MiB and trusted IPC records no caller-supplied details', async () => {
   await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
     const { main } = loadMain(projectRoot, userDataRoot);
@@ -426,6 +582,7 @@ test('diagnostic logs rotate at 1 MiB and trusted IPC records no caller-supplied
     fs.writeFileSync(logPath, largeLog, 'utf8');
 
     main.api.recordDiagnostic('rotation-test');
+    assert.equal(main.api.flushDiagnosticsSync(), true);
     assert.equal(fs.readFileSync(oldLogPath, 'utf8'), largeLog);
     const logLine = fs.readFileSync(logPath, 'utf8').trim();
     assert.equal(JSON.parse(logLine).event, 'rotation-test');
@@ -443,6 +600,7 @@ test('diagnostic logs rotate at 1 MiB and trusted IPC records no caller-supplied
       message: '/Users/private/config.json secret mascot settings',
     });
     report({ ...trustedEvent, senderFrame: { url: 'https://untrusted.invalid/' } }, 'window-error');
+    await main.api.flushDiagnostics();
     const entries = fs.readFileSync(logPath, 'utf8').trim().split('\n').map(JSON.parse);
     assert.equal(entries.length, 2);
     assert.deepEqual(entries[1], {

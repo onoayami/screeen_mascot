@@ -91,6 +91,7 @@ if [ "$VALIDATION_OK" -eq 1 ]; then
     record_failure "一時コピーへ移動"
     pause_and_exit 1
   fi
+  echo "Electron/electron-builder @latest は互換性候補の検査です。固定版の配布検証とは別扱いです。"
   if run_logged "03-dependency-candidate.log" npm install --package-lock-only --ignore-scripts --save-dev --save-exact electron@latest electron-builder@latest; then
     cp package.json "$RESULT_DIR/candidate-package.json"
     cp package-lock.json "$RESULT_DIR/candidate-package-lock.json"

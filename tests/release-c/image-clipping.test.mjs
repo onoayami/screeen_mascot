@@ -30,6 +30,21 @@ function configureSettings(settings, actions, selectedId = actions[0]?._uiId) {
   settings.mascotAPI.getAssetMetadata = async (file) => ({ cacheKey: file });
 }
 
+function legacyTransparentPixels(original, background, tolerance, feather) {
+  const output = new Uint8ClampedArray(original.data);
+  for (let index = 0; index < output.length; index += 4) {
+    const deltaR = output[index] - background.r;
+    const deltaG = output[index + 1] - background.g;
+    const deltaB = output[index + 2] - background.b;
+    const distance = Math.sqrt(deltaR ** 2 + deltaG ** 2 + deltaB ** 2);
+    if (distance <= tolerance) output[index + 3] = 0;
+    else if (feather > 0 && distance < tolerance + feather) {
+      output[index + 3] = Math.round(255 * ((distance - tolerance) / feather));
+    } else output[index + 3] = 255;
+  }
+  return output;
+}
+
 function cacheMeasurement(settings, action, measurement) {
   settings.api.sizeMeasurementCache.set(`${action._assetUrl}|${action.file}`, {
     promise: Promise.resolve(measurement),
@@ -53,7 +68,33 @@ async function openSizeManager(settings) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
-test('clipping reports each overflowing edge and allows the 0.5% tolerance', async () => {
+test('transparent conversion stays pixel-identical at thresholds with zero and nonzero feather', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    const settings = loadSettingsForTest({ projectRoot });
+    const background = { r: 10.5, g: 20, b: 30.25 };
+    const threshold = Math.sqrt(30.3125);
+    const original = {
+      width: 6,
+      height: 1,
+      data: new Uint8ClampedArray([
+        10, 20, 30, 255,
+        16, 20, 30, 177,
+        17, 20, 30, 120,
+        19, 20, 30, 0,
+        20, 20, 30, 64,
+        10, 25, 30, 33,
+      ]),
+    };
+
+    for (const feather of [0, 4]) {
+      const expected = legacyTransparentPixels(original, background, threshold, feather);
+      const actual = settings.api.makeTransparentImageData(original, background, threshold, feather);
+      assert.deepEqual(Array.from(actual.data), Array.from(expected), `feather=${feather}`);
+    }
+  });
+});
+
+test('clipping reports overflowing edges and allows the 0.5% tolerance', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const settings = loadSettingsForTest({ projectRoot });
     const compute = settings.api.computeClipping;
@@ -80,11 +121,10 @@ test('clipping reports each overflowing edge and allows the 0.5% tolerance', asy
     );
     const tolerated = compute(fullFrame(1, 0.9), { scale: 1, offsetX: 0.5, offsetY: 0 });
     assert.equal(tolerated.clipped, false);
-    assert.deepEqual(Array.from(tolerated.tight), ['left', 'right']);
   });
 });
 
-test('frame edges within 2% are tight, while 3% clearance is not', async () => {
+test('near-edge and exact-frame images are not clipped', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const settings = loadSettingsForTest({ projectRoot });
     const compute = settings.api.computeClipping;
@@ -100,12 +140,13 @@ test('frame edges within 2% are tight, while 3% clearance is not', async () => {
     });
 
     assert.equal(onePercent.clipped, false);
-    assert.deepEqual(Array.from(onePercent.tight), ['left']);
-    assert.deepEqual(Array.from(threePercent.tight), []);
+    assert.equal(threePercent.clipped, false);
+    assert.equal(compute(fullFrame(0.98), { scale: 1, offsetX: 0, offsetY: 0 }).clipped, false);
+    assert.equal(compute(fullFrame(), { scale: 1, offsetX: 0, offsetY: 0 }).clipped, false);
   });
 });
 
-test('fit scales to 92%, clears tight edges, and respects transform bounds', async () => {
+test('fit scales to 92% and respects transform bounds', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const settings = loadSettingsForTest({ projectRoot });
     const fit = settings.api.fitTransformToFrame;
@@ -118,14 +159,12 @@ test('fit scales to 92%, clears tight edges, and respects transform bounds', asy
     });
     const fittedStatus = settings.api.computeClipping(fullFrame(), fitted);
     assert.equal(fittedStatus.clipped, false);
-    assert.deepEqual(Array.from(fittedStatus.tight), []);
 
     const touchingImage = fit(fullFrame(), { scale: 1, offsetX: 0, offsetY: 0 });
     assert.equal(touchingImage.scale, 0.92);
     assert.equal(touchingImage.offsetX, 0);
     assert.equal(touchingImage.offsetY, 0);
     const touchingStatus = settings.api.computeClipping(fullFrame(), touchingImage);
-    assert.deepEqual(Array.from(touchingStatus.tight), []);
     assert.ok(Math.abs(touchingStatus.bounds.left - 0.04) < 1e-10);
     assert.ok(Math.abs(touchingStatus.bounds.right - 0.96) < 1e-10);
     assert.ok(Math.abs(touchingStatus.bounds.top - 0.04) < 1e-10);
@@ -141,26 +180,26 @@ test('fit scales to 92%, clears tight edges, and respects transform bounds', asy
   });
 });
 
-test('STEP 1 reports clipping, marks the action list, and fits only the selected image', async () => {
+test('STEP 1 warns and fits only clipped images', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const settings = loadSettingsForTest({ projectRoot });
     const clipped = createAction('clipped', { scale: 1.23, offsetX: 10, offsetY: 0 });
-    const tight = createAction('tight');
+    const nearEdge = createAction('near-edge');
     const untouched = createAction('untouched', { scale: 0.6, offsetX: 0, offsetY: 0 });
-    configureSettings(settings, [clipped, tight, untouched]);
+    configureSettings(settings, [clipped, nearEdge, untouched]);
     await prepareMeasurements(settings, [
       [clipped, fullFrame()],
-      [tight, fullFrame(0.5, 0.5, 0.26, 0.5)],
+      [nearEdge, fullFrame(0.5, 0.5, 0.26, 0.5)],
       [untouched, fullFrame()],
     ]);
 
     settings.api.renderActionList();
     settings.api.renderEditor();
-    assert.match(settings.api.elements.actionClippingStatus.textContent, /右.*切れています/);
+    assert.equal(settings.api.elements.actionClippingStatus.textContent, '⚠画像が枠からはみ出しています');
     assert.equal(settings.api.elements.actionFitInFrame.hidden, false);
     const item = settings.nodes.get('action-list').children[0];
     const button = item.children[0].children[0];
-    assert.equal(button.title, '画像が枠から見切れています');
+    assert.equal(button.title, '⚠画像が枠からはみ出しています');
     assert.equal(button.children[1].children[0].children[0].textContent, ' ⚠');
 
     assert.equal(settings.api.fitActionIntoFrame(clipped), true);
@@ -172,17 +211,18 @@ test('STEP 1 reports clipping, marks the action list, and fits only the selected
     assert.equal(settings.api.state.dirty, true);
     assert.equal(settings.nodes.get('toast').textContent, '枠に収めました。');
 
-    settings.api.state.selectedId = tight._uiId;
+    settings.api.state.selectedId = nearEdge._uiId;
     settings.api.renderActionList();
     settings.api.renderEditor();
-    assert.equal(settings.api.elements.actionClippingStatus.textContent, '⚠ 左が枠にぎりぎりです');
-    assert.equal(settings.api.elements.actionFitInFrame.hidden, false);
-    const tightItem = settings.nodes.get('action-list').children[1];
-    assert.equal(tightItem.children[0].children[0].title, '画像が枠にぎりぎりです');
-    assert.equal(settings.api.fitActionIntoFrame(tight), true);
-    const fixedTight = settings.api.computeClipping(fullFrame(0.5, 0.5, 0.26, 0.5), tight.imageTransform);
-    assert.equal(fixedTight.clipped, false);
-    assert.deepEqual(Array.from(fixedTight.tight), []);
+    assert.equal(settings.api.elements.actionClippingStatus.textContent, '見切れなし');
+    assert.equal(settings.api.elements.actionFitInFrame.hidden, true);
+    const nearEdgeItem = settings.nodes.get('action-list').children[1];
+    assert.equal(nearEdgeItem.children[0].children[0].title, 'near-edge');
+    assert.equal(nearEdgeItem.children[0].children[1].children[0].children.length, 0);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(nearEdge.imageTransform)),
+      { scale: 1, offsetX: 0, offsetY: 0 },
+    );
     assert.deepEqual(
       JSON.parse(JSON.stringify(untouched.imageTransform)),
       { scale: 0.6, offsetX: 0, offsetY: 0 },
@@ -190,7 +230,7 @@ test('STEP 1 reports clipping, marks the action list, and fits only the selected
   });
 });
 
-test('size comparison cards fix clipped and tight images only and alignment is capped at 92%', async () => {
+test('size comparison cards fix clipped images only and alignment is capped at 92%', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const savedPayloads = [];
     const settings = loadSettingsForTest({
@@ -203,12 +243,12 @@ test('size comparison cards fix clipped and tight images only and alignment is c
       },
     });
     const clipped = createAction('clipped', { scale: 1.2, offsetX: 0, offsetY: 10 });
-    const tight = createAction('tight');
+    const nearEdge = createAction('near-edge');
     const clear = createAction('clear', { scale: 0.6, offsetX: 0, offsetY: 0 });
-    configureSettings(settings, [clipped, tight, clear]);
+    configureSettings(settings, [clipped, nearEdge, clear]);
     await prepareMeasurements(settings, [
       [clipped, fullFrame()],
-      [tight, fullFrame(0.5, 0.5, 0.26, 0.5)],
+      [nearEdge, fullFrame(0.5, 0.5, 0.26, 0.5)],
       [clear, fullFrame()],
     ]);
 
@@ -216,11 +256,11 @@ test('size comparison cards fix clipped and tight images only and alignment is c
     const elements = settings.api.elements;
     assert.equal(elements.sizeManagerFitClipped.disabled, false);
     assert.equal(elements.sizeManagerGrid.children[0].children[3].hidden, false);
-    assert.equal(elements.sizeManagerGrid.children[1].children[3].textContent, '⚠ ぎりぎり');
-    assert.equal(elements.sizeManagerGrid.children[1].children[3].hidden, false);
+    assert.equal(elements.sizeManagerGrid.children[0].children[3].textContent, '⚠画像が枠からはみ出しています');
+    assert.equal(elements.sizeManagerGrid.children[1].children[3].hidden, true);
     assert.equal(elements.sizeManagerGrid.children[2].children[3].hidden, true);
     elements.sizeManagerFitClipped.onclick();
-    assert.equal(elements.sizeManagerStatus.textContent, '2 枚の画像を枠に収めました。');
+    assert.equal(elements.sizeManagerStatus.textContent, '1 枚の画像を枠に収めました。');
     assert.equal(elements.sizeManagerGrid.children[0].children[3].hidden, true);
     assert.equal(elements.sizeManagerGrid.children[1].children[3].hidden, true);
     await elements.sizeManagerSave.onclick();
@@ -231,7 +271,7 @@ test('size comparison cards fix clipped and tight images only and alignment is c
     );
     assert.deepEqual(
       JSON.parse(JSON.stringify(savedPayloads[0].actions[1].imageTransform)),
-      JSON.parse(JSON.stringify(tight.imageTransform)),
+      { flipX: false, scale: 1, offsetX: 0, offsetY: 0 },
     );
     assert.deepEqual(
       JSON.parse(JSON.stringify(clear.imageTransform)),
@@ -249,7 +289,6 @@ test('size comparison cards fix clipped and tight images only and alignment is c
     assert.equal(alignment.imageTransform.scale, 0.92);
     const alignmentStatus = settings.api.computeClipping(fullFrame(), alignment.imageTransform);
     assert.equal(alignmentStatus.clipped, false);
-    assert.deepEqual(Array.from(alignmentStatus.tight), []);
   });
 });
 
@@ -263,8 +302,7 @@ test('trimming warning updates while adjusting without changing the saved transf
 
     settings.api.elements.imageScale.value = '1.23';
     settings.api.elements.imageScale.oninput();
-    assert.match(settings.api.elements.imageEditorClippingStatus.textContent, /上.*下.*切れています/);
-    assert.match(settings.api.elements.imageEditorClippingStatus.textContent, /枠からはみ出した部分は、表示されません/);
+    assert.equal(settings.api.elements.imageEditorClippingStatus.textContent, '⚠画像が枠からはみ出しています');
     assert.deepEqual(
       JSON.parse(JSON.stringify(action.imageTransform)),
       { scale: 1, offsetX: 0, offsetY: 0 },
@@ -272,7 +310,7 @@ test('trimming warning updates while adjusting without changing the saved transf
 
     settings.api.elements.imageScale.value = '1';
     settings.api.elements.imageScale.oninput();
-    assert.equal(settings.api.elements.imageEditorClippingStatus.textContent, '⚠ 上・下・左・右が枠にぎりぎりです');
+    assert.equal(settings.api.elements.imageEditorClippingStatus.textContent, '見切れなし');
   });
 });
 

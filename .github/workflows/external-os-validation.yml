@@ -2,6 +2,12 @@ name: External OS validation
 
 on:
   workflow_dispatch:
+    inputs:
+      electron_latest_compat:
+        description: "Run the optional Electron/electron-builder latest compatibility candidate"
+        required: false
+        default: false
+        type: boolean
   push:
     branches:
       - main
@@ -17,17 +23,26 @@ concurrency:
 env:
   NODE_VERSION: "22"
   PYTHON_VERSION: "3.13"
-  SOURCE_ARCHIVE: desktop-mascot-ui-v2.3.4-external-validation.zip
-  SOURCE_ROOT: desktop-mascot-ui-v2.3.4
 
 jobs:
   source-package:
     name: Deterministic source archive
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      version: ${{ steps.source-version.outputs.version }}
     steps:
       - name: Check out the complete source
         uses: actions/checkout@v4
+
+      - name: Read package version
+        id: source-version
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_ARCHIVE=desktop-mascot-ui-v${version}-external-validation.zip" >> "$GITHUB_ENV"
+          echo "SOURCE_ROOT=desktop-mascot-ui-v${version}" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -66,6 +81,9 @@ jobs:
     needs: source-package
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      SOURCE_ARCHIVE: desktop-mascot-ui-v${{ needs.source-package.outputs.version }}-external-validation.zip
+      SOURCE_ROOT: desktop-mascot-ui-v${{ needs.source-package.outputs.version }}
     steps:
       - name: Download deterministic source archive
         uses: actions/download-artifact@v4
@@ -105,10 +123,13 @@ jobs:
           retention-days: 14
 
   macos-native-extraction-and-build:
-    name: macOS dependency candidate and unsigned build
+    name: macOS fixed dependency and unsigned build
     needs: source-package
     runs-on: macos-latest
     timeout-minutes: 90
+    env:
+      SOURCE_ARCHIVE: desktop-mascot-ui-v${{ needs.source-package.outputs.version }}-external-validation.zip
+      SOURCE_ROOT: desktop-mascot-ui-v${{ needs.source-package.outputs.version }}
     steps:
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -147,11 +168,8 @@ jobs:
 
           /usr/bin/rsync -a --delete "$source_root/" "$candidate/"
           cd "$candidate"
-          npm install --package-lock-only --ignore-scripts --save-exact --save-dev electron@latest electron-builder@latest \
-            2>&1 | tee "$result/dependency-candidate.log"
-          cp package.json "$result/candidate-package.json"
-          cp package-lock.json "$result/candidate-package-lock.json"
           npm run check:build-lock 2>&1 | tee "$result/dependency-lock-check.log"
+          npm ci 2>&1 | tee "$result/npm-ci.log"
           node - <<'NODE' > "$result/dependency-candidate.json"
           const packageJson = require('./package.json');
           const lock = require('./package-lock.json');
@@ -167,7 +185,6 @@ jobs:
           }, null, 2)}\n`);
           NODE
 
-          npm ci 2>&1 | tee "$result/npm-ci.log"
           npm install --no-save --no-package-lock playwright@1.63.0 \
             2>&1 | tee "$result/playwright-package.log"
           npx playwright install chromium 2>&1 | tee "$result/playwright-browser.log"
@@ -212,5 +229,55 @@ jobs:
           path: |
             ${{ runner.temp }}/macos-validation
             ${{ runner.temp }}/macos-candidate/dist
+          if-no-files-found: warn
+          retention-days: 14
+
+  electron-latest-compatibility:
+    name: Optional Electron latest compatibility candidate
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.electron_latest_compat == true }}
+    continue-on-error: true
+    needs: source-package
+    runs-on: macos-latest
+    timeout-minutes: 75
+    env:
+      SOURCE_ARCHIVE: desktop-mascot-ui-v${{ needs.source-package.outputs.version }}-external-validation.zip
+      SOURCE_ROOT: desktop-mascot-ui-v${{ needs.source-package.outputs.version }}
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download deterministic source archive
+        uses: actions/download-artifact@v4
+        with:
+          name: deterministic-source-archive
+          path: ${{ runner.temp }}/source-artifact
+
+      - name: Test optional dependency candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          result="$RUNNER_TEMP/electron-latest-compatibility"
+          extract_root="$RUNNER_TEMP/electron-latest-extracted"
+          candidate="$RUNNER_TEMP/electron-latest-candidate"
+          mkdir -p "$result" "$extract_root" "$candidate"
+          /usr/bin/ditto -x -k "$RUNNER_TEMP/source-artifact/$SOURCE_ARCHIVE" "$extract_root"
+          /usr/bin/rsync -a --delete "$extract_root/$SOURCE_ROOT/" "$candidate/"
+          cd "$candidate"
+          npm install --package-lock-only --ignore-scripts --save-exact --save-dev electron@latest electron-builder@latest \
+            2>&1 | tee "$result/dependency-candidate.log"
+          cp package.json "$result/candidate-package.json"
+          cp package-lock.json "$result/candidate-package-lock.json"
+          npm ci 2>&1 | tee "$result/npm-ci.log"
+          npm run check:build-lock 2>&1 | tee "$result/dependency-lock-check.log"
+          npm run test:automated 2>&1 | tee "$result/automated-tests.log"
+
+      - name: Upload optional compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: electron-latest-compatibility-evidence
+          path: ${{ runner.temp }}/electron-latest-compatibility
           if-no-files-found: warn
           retention-days: 14

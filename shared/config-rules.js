@@ -24,6 +24,7 @@ const ALLOWED_START_POSITIONS = Object.freeze([
 ]);
 
 const DEFAULT_DURATION_MS = Object.freeze([6000, 10000]);
+const MAX_IMAGE_PIXELS = 16_000_000;
 
 const CONFIG_RULES = Object.freeze({
   actionCount: Object.freeze({ minimum: 1, maximum: 100 }),
@@ -31,7 +32,7 @@ const CONFIG_RULES = Object.freeze({
   durationMs: Object.freeze({ minimum: 500, maximum: 600000, integer: true }),
   mascotSize: Object.freeze({ minimum: 32, maximum: 1000 }),
   margin: Object.freeze({ minimum: 0, maximum: 1000 }),
-  movementSpeed: Object.freeze({ minimum: 0, maximum: 2000 }),
+  movementSpeed: Object.freeze({ minimum: 0, maximum: 300 }),
   imageScale: Object.freeze({ minimum: 0.3, maximum: 3 }),
   imageOffset: Object.freeze({ minimum: -100, maximum: 100 }),
   effectIntervalMs: Object.freeze({ minimum: 50, maximum: 60000, integer: true }),
@@ -310,12 +311,47 @@ function validateAndNormalizeConfig(input, { validateAsset } = {}) {
   };
 }
 
+function validateAndNormalizeLoadedConfig(input, options = {}) {
+  if (!isRecord(input)) return { config: validateAndNormalizeConfig(input, options), warnings: [] };
+  const legacyMaximum = 2000;
+  const warnings = [];
+  const actions = Array.isArray(input.actions)
+    ? input.actions.map((action, index) => {
+        if (!isRecord(action) || !isRecord(action.movement)) return action;
+        const speed = action.movement.speed;
+        if (
+          typeof speed !== 'number'
+          || !Number.isFinite(speed)
+          || speed <= CONFIG_RULES.movementSpeed.maximum
+          || speed > legacyMaximum
+        ) return action;
+        const actionName = typeof action.name === 'string' && action.name.trim()
+          ? action.name.trim()
+          : `動作${index + 1}`;
+        warnings.push(
+          `「${actionName}」の旧速さ設定を上限300として読み込みました。元の設定ファイルは変更していません。全体保存または選択中の動作の保存時に、全動作の旧速さが300で更新されます。`,
+        );
+        return {
+          ...action,
+          movement: { ...action.movement, speed: CONFIG_RULES.movementSpeed.maximum },
+        };
+      })
+    : input.actions;
+  const compatibleInput = actions === input.actions ? input : { ...input, actions };
+  return {
+    config: validateAndNormalizeConfig(compatibleInput, options),
+    warnings,
+  };
+}
+
 return Object.freeze({
   ALLOWED_MOVEMENTS,
   ALLOWED_FLIP_MODES,
   ALLOWED_START_POSITIONS,
   DEFAULT_DURATION_MS,
+  MAX_IMAGE_PIXELS,
   CONFIG_RULES,
   validateAndNormalizeConfig,
+  validateAndNormalizeLoadedConfig,
 });
 });

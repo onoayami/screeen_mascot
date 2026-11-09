@@ -140,6 +140,7 @@ test('bulk save sends the new duration for every action exactly once', async () 
     const dialogMarkup = html.slice(dialogStart, dialogEnd);
     assert.equal((dialogMarkup.match(/<button\b/g) || []).length, 2);
     assert.match(dialogMarkup, /id="duration-bulk-cancel"[^>]*>キャンセル/);
+    assert.match(dialogMarkup, /表示時間・速さを一括設定/);
     assert.match(dialogMarkup, /id="duration-bulk-save"[^>]*>保存して反映/);
     assert.doesNotMatch(dialogMarkup, /duration-bulk-apply|この時間を使う/);
     configureSettings(settings, [[1000, 2000], [3000, 4000]]);
@@ -215,5 +216,145 @@ test('bulk duration validation rejects reversed and out-of-range values without 
 
     assert.equal(saveCalls, 0);
     click(settings.api.elements.durationBulkCancel);
+  });
+});
+
+test('speed-only bulk save changes moving actions but preserves still actions and durations', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    const savedPayloads = [];
+    const settings = loadSettingsForTest({
+      projectRoot,
+      mascotAPI: {
+        saveConfig: async (config) => {
+          savedPayloads.push(config);
+          return { ok: true, applied: true, config };
+        },
+      },
+    });
+    configureSettings(settings, [[1000, 2000], [3000, 4000], [5000, 6000]]);
+    settings.api.state.actions[1].movement = { type: 'horizontal', speed: 55 };
+    settings.api.state.actions[2].movement = { type: 'wander', speed: 90 };
+    openDurationBulk(settings);
+    settings.api.elements.durationBulkDurationEnabled.checked = false;
+    settings.api.elements.durationBulkDurationEnabled.dispatchEvent({ type: 'change' });
+    settings.api.elements.durationBulkSpeedEnabled.checked = true;
+    settings.api.elements.durationBulkSpeedEnabled.dispatchEvent({ type: 'change' });
+    settings.api.elements.durationBulkSpeed.value = '120';
+
+    await click(settings.api.elements.durationBulkSave);
+
+    assert.equal(savedPayloads.length, 1);
+    assert.deepEqual(
+      savedPayloads[0].actions.map((action) => action.movement.speed),
+      [0, 120, 120],
+    );
+    assert.deepEqual(
+      savedPayloads[0].actions.map((action) => Array.from(action.durationMs)),
+      [[1000, 2000], [3000, 4000], [5000, 6000]],
+    );
+    assert.equal(settings.api.state.dirty, false);
+    assert.equal(settings.api.elements.durationBulkDialog.open, false);
+  });
+});
+
+test('both bulk options apply all durations and only moving-action speeds', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    const settings = loadSettingsForTest({
+      projectRoot,
+      mascotAPI: { saveConfig: async (config) => ({ ok: true, applied: true, config }) },
+    });
+    configureSettings(settings, [[1000, 2000], [3000, 4000]]);
+    settings.api.state.actions[1].movement = { type: 'launch', speed: 55 };
+    openDurationBulk(settings);
+    settings.api.elements.durationBulkMin.value = '2';
+    settings.api.elements.durationBulkMax.value = '5';
+    settings.api.elements.durationBulkSpeedEnabled.checked = true;
+    settings.api.elements.durationBulkSpeedEnabled.dispatchEvent({ type: 'change' });
+    settings.api.elements.durationBulkSpeed.value = '200';
+
+    await click(settings.api.elements.durationBulkSave);
+
+    assert.deepEqual(
+      settings.api.state.actions.map((action) => Array.from(action.durationMs)),
+      [[2000, 5000], [2000, 5000]],
+    );
+    assert.deepEqual(settings.api.state.actions.map((action) => action.movement.speed), [0, 200]);
+  });
+});
+
+test('bulk settings reject no selection, invalid selected values, and a speed-only request without moving actions', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    let saveCalls = 0;
+    const settings = loadSettingsForTest({
+      projectRoot,
+      mascotAPI: { saveConfig: async () => { saveCalls += 1; return { ok: true }; } },
+    });
+    configureSettings(settings, [[1000, 2000], [3000, 4000]]);
+    openDurationBulk(settings);
+    settings.api.elements.durationBulkDurationEnabled.checked = false;
+    settings.api.elements.durationBulkDurationEnabled.dispatchEvent({ type: 'change' });
+    await click(settings.api.elements.durationBulkSave);
+    assert.match(settings.api.elements.durationBulkError.textContent, /表示時間または速さ/);
+    assert.equal(settings.api.state.dirty, false);
+
+    settings.api.elements.durationBulkSpeedEnabled.checked = true;
+    settings.api.elements.durationBulkSpeedEnabled.dispatchEvent({ type: 'change' });
+    settings.api.elements.durationBulkSpeed.value = '301';
+    await click(settings.api.elements.durationBulkSave);
+    assert.match(settings.api.elements.durationBulkError.textContent, /0〜300/);
+
+    settings.api.elements.durationBulkSpeed.value = '100';
+    settings.api.state.actions.forEach((action) => { action.movement = { type: 'still', speed: 0 }; });
+    await click(settings.api.elements.durationBulkSave);
+    assert.match(settings.api.elements.durationBulkError.textContent, /速さを変更できる動作がありません/);
+    assert.equal(settings.api.state.dirty, false);
+    assert.equal(saveCalls, 0);
+
+    click(settings.api.elements.durationBulkCancel);
+    assert.deepEqual(
+      settings.api.state.actions.map((action) => Array.from(action.durationMs)),
+      [[1000, 2000], [3000, 4000]],
+    );
+  });
+});
+
+test('bulk settings guard busy state and concurrent edits without advancing the save baseline', async () => {
+  await withTemporaryProject(async ({ projectRoot }) => {
+    let saveCalls = 0;
+    const settings = loadSettingsForTest({
+      projectRoot,
+      mascotAPI: {
+        saveConfig: async () => { saveCalls += 1; return { ok: false }; },
+      },
+    });
+    configureSettings(settings, [[1000, 2000], [3000, 4000]]);
+    settings.api.state.actions[1].movement = { type: 'horizontal', speed: 55 };
+    settings.api.state.persistedSnapshot = { config: { before: true }, actionIds: [] };
+    openDurationBulk(settings);
+    settings.api.elements.durationBulkSpeedEnabled.checked = true;
+    settings.api.elements.durationBulkSpeedEnabled.dispatchEvent({ type: 'change' });
+    settings.api.elements.durationBulkSpeed.value = '100';
+
+    settings.api.setBusy(true);
+    await click(settings.api.elements.durationBulkSave);
+    settings.api.setBusy(false);
+    assert.equal(saveCalls, 0);
+    assert.equal(settings.api.state.actions[1].movement.speed, 55);
+
+    settings.api.markDirty();
+    await click(settings.api.elements.durationBulkSave);
+    assert.match(settings.api.elements.durationBulkError.textContent, /設定が変更されました/);
+    assert.equal(saveCalls, 0);
+
+    click(settings.api.elements.durationBulkCancel);
+    openDurationBulk(settings);
+    settings.api.elements.durationBulkSpeedEnabled.checked = true;
+    settings.api.elements.durationBulkSpeedEnabled.dispatchEvent({ type: 'change' });
+    settings.api.elements.durationBulkSpeed.value = '100';
+    await click(settings.api.elements.durationBulkSave);
+    assert.equal(saveCalls, 1);
+    assert.equal(settings.api.state.actions[1].movement.speed, 100);
+    assert.deepEqual(settings.api.state.persistedSnapshot, { config: { before: true }, actionIds: [] });
+    assert.equal(settings.api.state.dirty, true);
   });
 });

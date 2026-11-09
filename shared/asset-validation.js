@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { MAX_IMAGE_PIXELS } = require('./config-rules');
 
 const ALLOWED_IMAGE_EXTENSIONS = Object.freeze([
   '.gif',
@@ -13,9 +14,9 @@ const ALLOWED_IMAGE_EXTENSIONS = Object.freeze([
   '.jpeg',
 ]);
 const MAX_IMAGE_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_IMAGE_PIXELS = 16_000_000;
 const MAX_GIF_FRAMES = 200;
 const MAX_GIF_DECODED_PIXELS = 256_000_000;
+const MAX_SVG_DIMENSION = 4096;
 
 function assertImageFileSize(stat, label) {
   if (Number(stat?.size) > MAX_IMAGE_FILE_BYTES) {
@@ -78,6 +79,98 @@ function validateGifResourceLimits(data, label) {
     }
     if (decodedPixels > MAX_GIF_DECODED_PIXELS) {
       throw new Error(`GIF画像の展開サイズが大きすぎます：${label}`);
+    }
+  }
+}
+
+function webpChunkDimensions(data, offset, chunkSize, declaredSize, label) {
+  const chunkType = data.subarray(offset, offset + 4).toString('ascii');
+  const payload = offset + 8;
+  if (payload + chunkSize > declaredSize) {
+    throw new Error(`WebP画像ヘッダーを読み取れません：${label}`);
+  }
+
+  if (chunkType === 'VP8X') {
+    if (chunkSize < 10 || payload + 10 > data.length) {
+      throw new Error(`WebP画像ヘッダーが正しくありません：${label}`);
+    }
+    return {
+      width: data.readUIntLE(payload + 4, 3) + 1,
+      height: data.readUIntLE(payload + 7, 3) + 1,
+    };
+  }
+
+  if (chunkType === 'VP8L') {
+    if (chunkSize < 5 || payload + 5 > data.length || data[payload] !== 0x2f) {
+      throw new Error(`WebP画像ヘッダーが正しくありません：${label}`);
+    }
+    return {
+      width: (data[payload + 1] | ((data[payload + 2] & 0x3f) << 8)) + 1,
+      height: (
+        ((data[payload + 2] & 0xc0) >> 6)
+        | (data[payload + 3] << 2)
+        | ((data[payload + 4] & 0x0f) << 10)
+      ) + 1,
+    };
+  }
+
+  if (chunkType === 'VP8 ') {
+    if (
+      chunkSize < 10
+      || payload + 10 > data.length
+      || data[payload + 3] !== 0x9d
+      || data[payload + 4] !== 0x01
+      || data[payload + 5] !== 0x2a
+    ) {
+      throw new Error(`WebP画像ヘッダーが正しくありません：${label}`);
+    }
+    return {
+      width: data.readUInt16LE(payload + 6) & 0x3fff,
+      height: data.readUInt16LE(payload + 8) & 0x3fff,
+    };
+  }
+
+  return null;
+}
+
+function validateWebpResourceLimits(data, label) {
+  const declaredSize = data.readUInt32LE(4) + 8;
+  if (declaredSize < 12) throw new Error(`WebP画像ヘッダーが正しくありません：${label}`);
+  let offset = 12;
+  let foundDimensions = false;
+  while (offset + 8 <= data.length && offset < declaredSize) {
+    const chunkSize = data.readUInt32LE(offset + 4);
+    const dimensions = webpChunkDimensions(data, offset, chunkSize, declaredSize, label);
+    if (dimensions) {
+      foundDimensions = true;
+      if (
+        dimensions.width <= 0
+        || dimensions.height <= 0
+        || dimensions.width * dimensions.height > MAX_IMAGE_PIXELS
+      ) {
+        throw new Error(`WebP画像は16MP以下にしてください：${label}`);
+      }
+    }
+    const nextOffset = offset + 8 + chunkSize + (chunkSize % 2);
+    if (nextOffset <= offset) break;
+    if (nextOffset > data.length) break;
+    offset = nextOffset;
+  }
+  if (!foundDimensions) throw new Error(`WebP画像サイズを確認できません：${label}`);
+}
+
+function validateSvgResourceLimits(prefix, label) {
+  if (/<!DOCTYPE|<!ENTITY/i.test(prefix)) {
+    throw new Error(`SVG画像にDOCTYPEまたはENTITYは使用できません：${label}`);
+  }
+  const rootTag = prefix.match(/<svg\b[^>]*>/i)?.[0];
+  if (!rootTag) return;
+  for (const dimension of ['width', 'height']) {
+    const value = rootTag.match(new RegExp(`\\b${dimension}\\s*=\\s*["']([^"']+)["']`, 'i'))?.[1];
+    if (value === undefined || /^\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?\s*%\s*$/i.test(value)) continue;
+    const numeric = value.match(/^\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)/i);
+    if (numeric && Number(numeric[1]) > MAX_SVG_DIMENSION) {
+      throw new Error(`SVG画像の${dimension}は${MAX_SVG_DIMENSION}以下にしてください：${label}`);
     }
   }
 }
@@ -162,12 +255,14 @@ function validateImageSignature(filePath, formatPath = filePath, fsModule = fs, 
     valid = data.length >= 12
       && data.subarray(0, 4).toString('ascii') === 'RIFF'
       && data.subarray(8, 12).toString('ascii') === 'WEBP';
+    if (valid) validateWebpResourceLimits(data, label);
   } else if (extension === '.svg') {
     const prefix = data
       .subarray(0, Math.min(data.length, 64 * 1024))
       .toString('utf8')
       .replace(/^\uFEFF/, '');
     valid = /<svg(?:\s|>)/i.test(prefix);
+    if (valid) validateSvgResourceLimits(prefix, label);
   }
   if (!valid) throw new Error(`画像形式と内容が一致しません：${label}`);
   return true;
@@ -225,7 +320,9 @@ function resolveImageFileWithinRoot(rootPath, relativePath, {
     throw new Error(`画像パスが素材フォルダの外を指しています：${relativePath}`);
   }
   if (!fsModule.existsSync(candidate)) {
-    throw new Error(`参照画像が見つかりません：${relativePath}`);
+    const error = new Error(`参照画像が見つかりません：${relativePath}`);
+    error.assetUnavailable = true;
+    throw error;
   }
   const lexicalStat = fsModule.lstatSync(candidate);
   if (lexicalStat.isSymbolicLink()) {
@@ -234,7 +331,12 @@ function resolveImageFileWithinRoot(rootPath, relativePath, {
   if (!lexicalStat.isFile()) {
     throw new Error(`参照画像が通常ファイルではありません：${relativePath}`);
   }
-  assertImageFileSize(lexicalStat, relativePath);
+  try {
+    assertImageFileSize(lexicalStat, relativePath);
+  } catch (error) {
+    error.assetContentInvalid = true;
+    throw error;
+  }
 
   const realRoot = fsModule.realpathSync(root);
   const realCandidate = fsModule.realpathSync(candidate);
@@ -245,9 +347,14 @@ function resolveImageFileWithinRoot(rootPath, relativePath, {
   if (!realCandidateStat.isFile()) {
     throw new Error(`参照画像の実体が通常ファイルではありません：${relativePath}`);
   }
-  assertImageFileSize(realCandidateStat, relativePath);
-  validateImageSignature(candidate, normalized, fsModule);
-  if (typeof validateAsset === 'function') validateAsset(candidate, normalized);
+  try {
+    assertImageFileSize(realCandidateStat, relativePath);
+    validateImageSignature(candidate, normalized, fsModule);
+    if (typeof validateAsset === 'function') validateAsset(candidate, normalized);
+  } catch (error) {
+    if (!error?.code) error.assetContentInvalid = true;
+    throw error;
+  }
   return candidate;
 }
 
@@ -267,7 +374,6 @@ function copyValidatedImageFile({
     validateStandaloneImageFile(destinationFile, {
       fsModule,
       label: path.basename(destinationFile),
-      validateAsset,
     });
     if (sha256File(source, fsModule) !== sha256File(destinationFile, fsModule)) {
       throw new Error(`コピー後の画像ハッシュが一致しません：${path.basename(sourceFile)}`);

@@ -21,7 +21,10 @@ function validImageBytes(extension) {
     case '.jpg':
       return Buffer.from([0xff, 0xd8, 0xff]);
     case '.webp':
-      return Buffer.from([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]);
+      return Buffer.from([
+        0x52, 0x49, 0x46, 0x46, 17, 0, 0, 0, 0x57, 0x45, 0x42, 0x50,
+        0x56, 0x50, 0x38, 0x4c, 5, 0, 0, 0, 0x2f, 0, 0, 0, 0,
+      ]);
     case '.svg':
       return Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>');
     default:
@@ -164,6 +167,7 @@ test('A2-10: settings preload exposes no mascot-only capabilities', async () => 
     assert.equal(preload.exposedName, 'mascotAPI');
     assert.deepEqual(Object.keys(preload.api).sort(), [
       'chooseImage',
+      'discardImportedImage',
       'getAppInfo',
       'getAssetMetadata',
       'getPathForFile',
@@ -176,6 +180,44 @@ test('A2-10: settings preload exposes no mascot-only capabilities', async () => 
       'saveConfig',
       'saveTransparentPng',
     ]);
+    await preload.api.getPathForFile({});
+    assert.equal(preload.invoked.at(-1).channel, 'mascot:register-dropped-path');
+  });
+});
+
+test('A2-14: dropped image imports require a trusted single-use token', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const { main, mascotWindow, settingsWindow } = createMainWithWindows(projectRoot, userDataRoot);
+    const register = main.handlers.get('mascot:register-dropped-path');
+    const importImage = main.handlers.get('mascot:import-image');
+    const sourcePath = path.join(projectRoot, 'characters', 'default', 'actions', 'rest.svg');
+    await assert.rejects(
+      () => register(eventFor(mascotWindow), sourcePath),
+      /許可されていません/,
+    );
+    await assert.rejects(
+      () => importImage(eventFor(settingsWindow), { sourcePath, category: 'actions' }),
+      /無効または期限切れ/,
+    );
+
+    const token = await register(eventFor(settingsWindow), sourcePath);
+    assert.match(token, /^drop:/);
+    const imported = await importImage(
+      eventFor(settingsWindow),
+      { sourcePath: token, category: 'actions' },
+    );
+    assert.match(imported.relativePath, /^actions\/rest(?:-\d+)?\.svg$/);
+    await assert.rejects(
+      () => importImage(eventFor(settingsWindow), { sourcePath: token, category: 'actions' }),
+      /無効または期限切れ/,
+    );
+
+    const expiredToken = await register(eventFor(settingsWindow), sourcePath);
+    main.api.droppedPathTokens.get(expiredToken).expiresAt = 0;
+    await assert.rejects(
+      () => importImage(eventFor(settingsWindow), { sourcePath: expiredToken, category: 'actions' }),
+      /無効または期限切れ/,
+    );
   });
 });
 

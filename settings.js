@@ -4,6 +4,7 @@ const REQUIRED_MASCOT_API_METHODS = Object.freeze([
   'reportDirtyState',
   'resolveAsset',
   'getAssetMetadata',
+  'discardImportedImage',
   'chooseImage',
   'importImage',
   'saveTransparentPng',
@@ -16,6 +17,8 @@ const REQUIRED_MASCOT_API_METHODS = Object.freeze([
 const sharedRules = window.DesktopMascotConfigRules;
 const SETTINGS_RULES = sharedRules?.CONFIG_RULES;
 const DEFAULT_DURATION_MS = sharedRules?.DEFAULT_DURATION_MS;
+const IMAGE_SCALE_RULE = SETTINGS_RULES?.imageScale;
+const IMAGE_OFFSET_RULE = SETTINGS_RULES?.imageOffset;
 const MAX_ACTIONS = SETTINGS_RULES?.actionCount.maximum;
 const ALLOWED_MOVEMENTS = new Set(sharedRules?.ALLOWED_MOVEMENTS || []);
 const ALLOWED_FLIPS = new Set(sharedRules?.ALLOWED_FLIP_MODES || []);
@@ -34,13 +37,12 @@ const elements = {
   feedback: document.getElementById('feedback'),
   toast: document.getElementById('toast'),
   recoveryPanel: document.getElementById('recovery-panel'),
+  recoveryHeading: document.getElementById('recovery-heading'),
   recoveryMessage: document.getElementById('recovery-message'),
   recoveryBackup: document.getElementById('recovery-backup'),
   recoveryDefaults: document.getElementById('recovery-defaults'),
-  mascotName: document.getElementById('mascot-name'),
   mascotSize: document.getElementById('mascot-size'),
   mascotSizeOutput: document.getElementById('mascot-size-output'),
-  startPosition: document.getElementById('start-position'),
   rememberPosition: document.getElementById('remember-position'),
   addAction: document.getElementById('add-action'),
   actionList: document.getElementById('action-list'),
@@ -49,10 +51,15 @@ const elements = {
   emptyState: document.getElementById('empty-state'),
   actionEditor: document.getElementById('action-editor'),
   actionPreviewFrame: document.getElementById('action-preview-frame'),
+  actionPreviewMarker: document.getElementById('action-preview-marker'),
+  actionPreviewScale: document.getElementById('action-preview-scale'),
+  actionActualSize: document.getElementById('action-actual-size'),
   moveUp: document.getElementById('move-up'),
   moveDown: document.getElementById('move-down'),
   deleteAction: document.getElementById('delete-action'),
+  saveSelectedAction: document.getElementById('save-selected-action'),
   actionDropzone: document.getElementById('action-dropzone'),
+  imageControlStack: document.getElementById('image-control-stack'),
   actionPreview: document.getElementById('action-preview'),
   actionClippingStatus: document.getElementById('action-clipping-status'),
   actionFitInFrame: document.getElementById('action-fit-in-frame'),
@@ -67,6 +74,10 @@ const elements = {
   movementType: document.getElementById('movement-type'),
   movementSpeed: document.getElementById('movement-speed'),
   speedOutput: document.getElementById('speed-output'),
+  movementSpeedPreviewStage: document.getElementById('movement-speed-preview-stage'),
+  movementSpeedPreviewImage: document.getElementById('movement-speed-preview-image'),
+  movementSpeedPreviewNote: document.getElementById('movement-speed-preview-note'),
+  movementSpeedPreviewStop: document.getElementById('movement-speed-preview-stop'),
   effectEnabled: document.getElementById('effect-enabled'),
   effectSettings: document.getElementById('effect-settings'),
   effectDropzone: document.getElementById('effect-dropzone'),
@@ -76,6 +87,8 @@ const elements = {
   effectLiveMascot: document.getElementById('effect-live-mascot'),
   effectLiveMascotImage: document.getElementById('effect-live-mascot-image'),
   effectLiveImage: document.getElementById('effect-live-image'),
+  effectPreviewScale: document.getElementById('effect-preview-scale'),
+  effectActualSize: document.getElementById('effect-actual-size'),
   effectInterval: document.getElementById('effect-interval'),
   effectSize: document.getElementById('effect-size'),
   effectLifetime: document.getElementById('effect-lifetime'),
@@ -84,11 +97,24 @@ const elements = {
   effectWhileStill: document.getElementById('effect-while-still'),
   prepareReleaseButton: document.getElementById('prepare-release-button'),
   reloadButton: document.getElementById('reload-button'),
+  headerSaveButton: document.getElementById('save-button-header'),
   saveButton: document.getElementById('save-button'),
   imageEditorDialog: document.getElementById('image-editor-dialog'),
   imageEditorClose: document.getElementById('image-editor-close'),
   imageEditorFrame: document.getElementById('image-editor-preview-frame'),
   imageEditorPreview: document.getElementById('image-editor-preview'),
+  imageEditorStage: document.getElementById('image-editor-preview-stage'),
+  imageEditorPreviewScale: document.getElementById('image-editor-preview-scale'),
+  imageEditorActualSize: document.getElementById('image-editor-actual-size'),
+  imageEditorMagnify: document.getElementById('image-editor-magnify'),
+  actualSizeDialog: document.getElementById('actual-size-dialog'),
+  actualSizeClose: document.getElementById('actual-size-close'),
+  actualSizeScale: document.getElementById('actual-size-scale'),
+  actualSizeViewport: document.getElementById('actual-size-viewport'),
+  actualSizeScene: document.getElementById('actual-size-scene'),
+  actualSizeMascot: document.getElementById('actual-size-mascot'),
+  actualSizeImage: document.getElementById('actual-size-image'),
+  actualSizeEffect: document.getElementById('actual-size-effect'),
   imageEditorClippingStatus: document.getElementById('image-editor-clipping-status'),
   imageScale: document.getElementById('image-scale'),
   imageScaleOutput: document.getElementById('image-scale-output'),
@@ -127,6 +153,9 @@ const elements = {
   durationBulkDialog: document.getElementById('duration-bulk-dialog'),
   durationBulkMin: document.getElementById('duration-bulk-min'),
   durationBulkMax: document.getElementById('duration-bulk-max'),
+  durationBulkDurationEnabled: document.getElementById('duration-bulk-duration-enabled'),
+  durationBulkSpeedEnabled: document.getElementById('duration-bulk-speed-enabled'),
+  durationBulkSpeed: document.getElementById('duration-bulk-speed'),
   durationBulkCount: document.getElementById('duration-bulk-count'),
   durationBulkError: document.getElementById('duration-bulk-error'),
   durationBulkCancel: document.getElementById('duration-bulk-cancel'),
@@ -150,7 +179,12 @@ const state = {
   config: null,
   actions: [],
   selectedId: null,
+  persistedSnapshot: null,
+  migrationPending: false,
+  loadWarnings: [],
+  migrationWarnings: [],
   dirty: false,
+  applyRetry: false,
   busy: false,
   isPackaged: true,
   revision: 0,
@@ -161,11 +195,21 @@ const state = {
   activeJpegCancel: null,
 };
 const actionCardViews = new Map();
+let lastRenderedEditorActionId = null;
 const imagePanBindings = new WeakMap();
 const actionMeasurements = new Map();
 let measurementQueueRunning = false;
 let measurementQueueRequested = false;
 let activeImageEditor = null;
+let refreshSizeManagerPreviews = null;
+let actualSizeSource = null;
+let movementPreviewFrame = null;
+let movementPreviewRunning = false;
+let movementPreviewLastTimestamp = null;
+let movementPreviewPosition = 0;
+let movementPreviewDirection = 1;
+let movementPreviewActionId = null;
+let durationBulkRevision = 0;
 
 function beginSizeManagerGeneration() {
   state.sizeManagerGeneration += 1;
@@ -207,6 +251,7 @@ const movementLabels = {
 
 // Keep in sync with renderer.js SAFE_EDGE_INSET and maximumMascotSize().
 const SAFE_EDGE_INSET = 12;
+const MAX_ACTION_PREVIEW_SIZE = 216;
 
 let toastTimer = null;
 
@@ -255,22 +300,24 @@ function normalizeImageTransform(value) {
   const transform = value && typeof value === 'object' ? value : {};
   return {
     flipX: transform.flipX === true,
-    scale: clamp(numberOr(transform.scale, 1), 0.3, 3),
-    offsetX: clamp(numberOr(transform.offsetX, 0), -100, 100),
-    offsetY: clamp(numberOr(transform.offsetY, 0), -100, 100),
+    scale: clamp(numberOr(transform.scale, 1), IMAGE_SCALE_RULE.minimum, IMAGE_SCALE_RULE.maximum),
+    offsetX: clamp(
+      numberOr(transform.offsetX, 0),
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
+    ),
+    offsetY: clamp(
+      numberOr(transform.offsetY, 0),
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
+    ),
   };
 }
 
 const CLIPPING_TOLERANCE = 0.005;
-const TIGHT_EDGE_LIMIT = 0.02;
+const FRAME_CLEARANCE_TARGET = 0.02;
 const FRAME_FIT_LIMIT = 0.92;
-const SAFE_FRAME_MARGIN = TIGHT_EDGE_LIMIT + CLIPPING_TOLERANCE;
-const CLIPPING_EDGE_LABELS = Object.freeze({
-  top: '上',
-  bottom: '下',
-  left: '左',
-  right: '右',
-});
+const SAFE_FRAME_MARGIN = FRAME_CLEARANCE_TARGET + CLIPPING_TOLERANCE;
 
 function measurementForTransform(measurement, transformValue) {
   const transform = normalizeImageTransform(transformValue);
@@ -307,35 +354,11 @@ function computeClipping(measurement, transformValue) {
   const edges = Object.entries(overflow)
     .filter(([, amount]) => amount > CLIPPING_TOLERANCE)
     .map(([edge, amount]) => ({ edge, amount, percent: amount * 100 }));
-  const tight = Object.entries({
-    top: bounds.top >= -CLIPPING_TOLERANCE && bounds.top <= TIGHT_EDGE_LIMIT,
-    bottom: bounds.bottom <= 1 + CLIPPING_TOLERANCE && bounds.bottom >= 1 - TIGHT_EDGE_LIMIT,
-    left: bounds.left >= -CLIPPING_TOLERANCE && bounds.left <= TIGHT_EDGE_LIMIT,
-    right: bounds.right <= 1 + CLIPPING_TOLERANCE && bounds.right >= 1 - TIGHT_EDGE_LIMIT,
-  })
-    .filter(([, isTight]) => isTight)
-    .map(([edge]) => edge);
-  return { clipped: edges.length > 0, edges, tight, overflow, bounds };
-}
-
-function formatClippingStatus(clipping) {
-  const details = clipping.edges.map(({ edge, percent }) => (
-    `${CLIPPING_EDGE_LABELS[edge]}（約 ${Math.max(1, Math.round(percent))}%）`
-  ));
-  if (details.length === 1) {
-    const [detail] = details;
-    return `⚠ ${detail.replace('（', 'が切れています（')}`;
-  }
-  return `⚠ ${details.join('・')}が切れています`;
-}
-
-function formatTightStatus(clipping) {
-  const edges = clipping.tight.map((edge) => CLIPPING_EDGE_LABELS[edge]);
-  return `⚠ ${edges.join('・')}が枠にぎりぎりです`;
+  return { clipped: edges.length > 0, edges, overflow, bounds };
 }
 
 function hasFrameIssue(clipping) {
-  return Boolean(clipping && (clipping.clipped || clipping.tight.length > 0));
+  return Boolean(clipping?.clipped);
 }
 
 function fitTransformToFrame(measurement, transformValue) {
@@ -353,7 +376,11 @@ function fitTransformToFrame(measurement, transformValue) {
     let corrected = offset;
     if (start < SAFE_FRAME_MARGIN) corrected += (SAFE_FRAME_MARGIN - start) * 100;
     else if (end > 1 - SAFE_FRAME_MARGIN) corrected -= (end - (1 - SAFE_FRAME_MARGIN)) * 100;
-    return clamp(Math.round(corrected * 100) / 100, -100, 100);
+    return clamp(
+      Math.round(corrected * 100) / 100,
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
+    );
   };
   let bounds = visibleContentBounds(measurement, transform);
   transform.offsetX = correctOffset(transform.offsetX, bounds.left, bounds.right);
@@ -366,6 +393,126 @@ function applyImageTransform(imageElement, transformValue) {
   const transform = normalizeImageTransform(transformValue);
   const flipX = transform.flipX ? 'scaleX(-1) ' : '';
   imageElement.style.transform = `translate(${transform.offsetX}%, ${transform.offsetY}%) ${flipX}scale(${transform.scale})`;
+}
+
+function stepMovementPreview(position, direction, speed, deltaSeconds, travelSpan) {
+  if (!(travelSpan > 0) || !(speed > 0)) return { position, direction };
+  const phase = direction >= 0 ? position : (2 * travelSpan) - position;
+  const period = 2 * travelSpan;
+  const nextPhase = ((phase + speed * Math.min(0.05, Math.max(0, deltaSeconds))) % period + period) % period;
+  if (nextPhase < travelSpan) return { position: nextPhase, direction: 1 };
+  return { position: period - nextPhase, direction: -1 };
+}
+
+function stopMovementSpeedPreview(message = '速さを変更するとプレビューします。') {
+  if (movementPreviewFrame !== null) {
+    window.cancelAnimationFrame(movementPreviewFrame);
+    movementPreviewFrame = null;
+  }
+  movementPreviewRunning = false;
+  movementPreviewLastTimestamp = null;
+  movementPreviewActionId = null;
+  elements.movementSpeedPreviewImage.hidden = true;
+  elements.movementSpeedPreviewStop.disabled = true;
+  elements.movementSpeedPreviewNote.textContent = message;
+}
+
+function movementPreviewImageTransform(action, direction) {
+  const base = normalizeImageTransform(action.imageTransform);
+  const directionFlip = action.flipMode === 'direction' && direction < 0;
+  return { ...base, flipX: base.flipX !== directionFlip };
+}
+
+function animateMovementSpeedPreview(timestamp) {
+  movementPreviewFrame = null;
+  if (!movementPreviewRunning || document.hidden) {
+    stopMovementSpeedPreview();
+    return;
+  }
+  const action = selectedAction();
+  if (!action || action._uiId !== movementPreviewActionId) {
+    stopMovementSpeedPreview();
+    return;
+  }
+  const stage = elements.movementSpeedPreviewStage.getBoundingClientRect();
+  const travelSpan = stage.width - (8 * 2) - 76;
+  if (!(travelSpan > 0)) {
+    stopMovementSpeedPreview('プレビュー欄に移動できる幅がありません。');
+    return;
+  }
+  const deltaSeconds = movementPreviewLastTimestamp === null
+    ? 0
+    : Math.min(0.05, Math.max(0, (timestamp - movementPreviewLastTimestamp) / 1000));
+  movementPreviewLastTimestamp = timestamp;
+  const speed = Number(elements.movementSpeed.value);
+  const next = stepMovementPreview(
+    movementPreviewPosition,
+    movementPreviewDirection,
+    speed,
+    deltaSeconds,
+    travelSpan,
+  );
+  movementPreviewPosition = next.position;
+  if (movementPreviewDirection !== next.direction) {
+    movementPreviewDirection = next.direction;
+    applyImageTransform(
+      elements.movementSpeedPreviewImage,
+      movementPreviewImageTransform(action, movementPreviewDirection),
+    );
+  }
+  elements.movementSpeedPreviewImage.style.left = `${8 + movementPreviewPosition}px`;
+  movementPreviewFrame = window.requestAnimationFrame(animateMovementSpeedPreview);
+}
+
+function startMovementSpeedPreview(action) {
+  const speed = Number(elements.movementSpeed.value);
+  if (document.hidden) {
+    stopMovementSpeedPreview();
+    return;
+  }
+  if (!action || action.movement?.type === 'still') {
+    stopMovementSpeedPreview('この動作はその場に留まるため、速度プレビューはありません。');
+    return;
+  }
+  if (!action._assetUrl) {
+    stopMovementSpeedPreview('画像を設定すると速度プレビューを表示できます。');
+    return;
+  }
+  if (!Number.isFinite(speed) || speed <= 0 || speed > SETTINGS_RULES.movementSpeed.maximum) {
+    stopMovementSpeedPreview('0より大きい速さに変更するとプレビューします。');
+    return;
+  }
+  if (movementPreviewRunning && movementPreviewActionId === action._uiId) {
+    elements.movementSpeedPreviewNote.textContent = `横移動をプレビュー中：${speed} px/秒`;
+    return;
+  }
+
+  stopMovementSpeedPreview();
+  const stage = elements.movementSpeedPreviewStage.getBoundingClientRect();
+  if (!(stage.width - (8 * 2) - 76 > 0)) {
+    elements.movementSpeedPreviewNote.textContent = 'プレビュー欄に移動できる幅がありません。';
+    return;
+  }
+  movementPreviewRunning = true;
+  movementPreviewActionId = action._uiId;
+  movementPreviewPosition = 0;
+  movementPreviewDirection = 1;
+  movementPreviewLastTimestamp = null;
+  elements.movementSpeedPreviewImage.src = action._assetUrl;
+  elements.movementSpeedPreviewImage.hidden = false;
+  elements.movementSpeedPreviewImage.style.left = '8px';
+  applyImageTransform(
+    elements.movementSpeedPreviewImage,
+    movementPreviewImageTransform(action, movementPreviewDirection),
+  );
+  elements.movementSpeedPreviewStop.disabled = false;
+  elements.movementSpeedPreviewNote.textContent = `横移動をプレビュー中：${speed} px/秒`;
+  movementPreviewFrame = window.requestAnimationFrame(animateMovementSpeedPreview);
+}
+
+function showDialog(dialog) {
+  stopMovementSpeedPreview();
+  dialog.showModal();
 }
 
 function formatImageOffset(value) {
@@ -404,13 +551,13 @@ function attachImagePan(frame, transform, onChange) {
     if (!activeDrag || event.pointerId !== activeDrag.pointerId) return;
     currentTransform.offsetX = clamp(
       Math.round((activeDrag.offsetX + (event.clientX - activeDrag.startX) / activeDrag.width * 100) * 100) / 100,
-      -100,
-      100,
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
     );
     currentTransform.offsetY = clamp(
       Math.round((activeDrag.offsetY + (event.clientY - activeDrag.startY) / activeDrag.height * 100) * 100) / 100,
-      -100,
-      100,
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
     );
     currentOnChange(currentTransform);
   });
@@ -431,9 +578,11 @@ function attachImagePan(frame, transform, onChange) {
 }
 
 function disableUnavailableEditor() {
+  stopMovementSpeedPreview();
   state.apiAvailable = false;
   state.busy = false;
   state.dirty = false;
+  state.migrationPending = false;
   state.activeOperation = null;
   for (const element of Object.values(elements)) {
     if (element && 'disabled' in element) element.disabled = true;
@@ -453,7 +602,8 @@ function setBusy(busy) {
     return;
   }
   state.busy = busy;
-  elements.saveButton.disabled = busy || !state.dirty;
+  if (busy) stopMovementSpeedPreview();
+  updateSaveButtons();
   elements.reloadButton.disabled = busy;
   elements.prepareReleaseButton.disabled = busy;
   elements.addAction.disabled = busy || state.actions.length >= MAX_ACTIONS;
@@ -462,6 +612,21 @@ function setBusy(busy) {
   elements.openDurationBulk.disabled = busy || state.actions.length === 0;
   elements.recoveryBackup.disabled = busy || Boolean(elements.recoveryBackup.dataset.unavailable);
   elements.recoveryDefaults.disabled = busy;
+}
+
+function updateSaveButtons() {
+  for (const button of [elements.headerSaveButton, elements.saveButton]) {
+    if (button) button.disabled = !state.apiAvailable || state.busy || !state.dirty;
+  }
+  if (!elements.saveSelectedAction) return;
+  const action = selectedAction();
+  elements.saveSelectedAction.disabled = state.busy
+    || !action
+    || (!state.applyRetry && !isSelectedActionPending(action));
+  elements.saveSelectedAction.setAttribute(
+    'aria-label',
+    action ? `「${action.name || '名前のない動作'}」を保存` : '選択中の動作を保存',
+  );
 }
 
 function beginOperation(label = 'operation') {
@@ -489,28 +654,40 @@ function markDirty() {
   elements.saveState.classList.remove('is-saved');
   elements.feedback.textContent = '変更はまだ保存されていません。';
   elements.feedback.classList.remove('is-error');
-  elements.saveButton.disabled = state.busy;
+  updateSaveButtons();
 }
 
 function markSaved() {
   state.dirty = false;
+  state.applyRetry = false;
   window.mascotAPI.reportDirtyState(false);
   elements.saveState.textContent = '保存済み';
   elements.saveState.classList.remove('is-dirty');
   elements.saveState.classList.add('is-saved');
   elements.feedback.textContent = '設定はマスコットへ反映されています。';
   elements.feedback.classList.remove('is-error');
-  elements.saveButton.disabled = true;
+  updateSaveButtons();
 }
 
 function markLoaded() {
   state.dirty = false;
+  state.applyRetry = false;
   window.mascotAPI.reportDirtyState(false);
   elements.saveState.textContent = '読み込み済み';
   elements.saveState.classList.remove('is-dirty', 'is-saved');
   elements.feedback.textContent = '設定ファイルを読み込みました。マスコットへの反映状態は未確認です。';
   elements.feedback.classList.remove('is-error');
-  elements.saveButton.disabled = true;
+  updateSaveButtons();
+}
+
+function markMigrationsPersisted() {
+  state.migrationPending = false;
+  if (state.migrationWarnings.length === 0) return;
+  const migrationWarnings = new Set(state.migrationWarnings);
+  state.loadWarnings = state.loadWarnings.filter((warning) => !migrationWarnings.has(warning));
+  state.migrationWarnings = [];
+  elements.recoveryMessage.textContent = state.loadWarnings.join('／');
+  elements.recoveryPanel.hidden = state.loadWarnings.length === 0;
 }
 
 function showError(message) {
@@ -553,7 +730,7 @@ async function resolveAction(action) {
     effect = { ...action.effect, _assetUrl: effectAssetUrl };
   }
 
-  const flipMode = ['direction', 'none', 'random'].includes(action.flipMode)
+  const flipMode = ALLOWED_FLIPS.has(action.flipMode)
     ? action.flipMode
     : 'direction';
 
@@ -565,9 +742,141 @@ async function resolveAction(action) {
     flipMode,
     imageTransform: normalizeImageTransform(action.imageTransform),
     movement: { type: 'still', speed: 0, ...(action.movement || {}) },
-    durationMs: Array.isArray(action.durationMs) ? action.durationMs : [...DEFAULT_DURATION_MS],
+    durationMs: Array.isArray(action.durationMs) ? [...action.durationMs] : [...DEFAULT_DURATION_MS],
     ...(effect ? { effect } : {}),
   };
+}
+
+function canonicalValue(value) {
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    return { __number: String(value) };
+  }
+  if (value === undefined) return { __undefined: true };
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.keys(value)
+        .filter((key) => !key.startsWith('_'))
+        .sort()
+        .map((key) => [key, canonicalValue(value[key])]),
+    );
+  }
+  return value;
+}
+
+function comparableScalar(value) {
+  if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+    return Number(value);
+  }
+  return value;
+}
+
+function comparableAction(action = {}) {
+  const transform = action.imageTransform || {};
+  const movement = action.movement || {};
+  const effect = action.effect;
+  return canonicalValue({
+    name: String(action.name ?? '').trim(),
+    file: action.file ?? '',
+    weight: comparableScalar(action.weight ?? 1),
+    durationMs: Array.isArray(action.durationMs)
+      ? action.durationMs.map(comparableScalar)
+      : [...DEFAULT_DURATION_MS],
+    flipMode: action.flipMode ?? 'direction',
+    imageTransform: {
+      flipX: transform.flipX ?? false,
+      scale: comparableScalar(transform.scale ?? 1),
+      offsetX: comparableScalar(transform.offsetX ?? 0),
+      offsetY: comparableScalar(transform.offsetY ?? 0),
+    },
+    movement: {
+      type: movement.type ?? 'still',
+      speed: comparableScalar(movement.speed ?? 0),
+    },
+    effect: effect
+      ? {
+          file: effect.file ?? '',
+          intervalMs: comparableScalar(effect.intervalMs ?? 450),
+          size: comparableScalar(effect.size ?? 32),
+          lifetimeMs: comparableScalar(effect.lifetimeMs ?? 1800),
+          offsetX: comparableScalar(effect.offsetX ?? 0),
+          offsetY: comparableScalar(effect.offsetY ?? 12),
+          coordinateVersion: effect.coordinateVersion ?? 2,
+          emitWhileStill: effect.emitWhileStill ?? false,
+        }
+      : null,
+  });
+}
+
+function comparableConfig(config = {}) {
+  const mascot = config.mascot || {};
+  return JSON.stringify(canonicalValue({
+    name: String(config.name ?? 'マスコット').trim() || 'マスコット',
+    mascot: {
+      size: comparableScalar(mascot.size ?? 180),
+      startPosition: mascot.startPosition ?? 'bottom-right',
+      margin: comparableScalar(mascot.margin ?? 40),
+      rememberPosition: mascot.rememberPosition !== false,
+    },
+    actions: (config.actions || []).map(comparableAction),
+  }));
+}
+
+function workingConfigForComparison() {
+  return {
+    ...state.config,
+    actions: state.actions,
+  };
+}
+
+function setPersistedSnapshot(config, actionIds) {
+  if (!config || !Array.isArray(config.actions)) {
+    state.persistedSnapshot = null;
+    return;
+  }
+  state.persistedSnapshot = {
+    config: structuredClone(config),
+    actionIds: config.actions.map((_, index) => actionIds[index] || newId()),
+  };
+}
+
+function hasPendingChanges() {
+  if (!state.persistedSnapshot || !state.config) return Boolean(state.config || state.actions.length);
+  return state.migrationPending || comparableConfig(workingConfigForComparison())
+    !== comparableConfig(state.persistedSnapshot.config);
+}
+
+function persistedActionIndex(actionId) {
+  return state.persistedSnapshot?.actionIds.indexOf(actionId) ?? -1;
+}
+
+function isSelectedActionPending(action = selectedAction()) {
+  if (!action || !state.persistedSnapshot) return Boolean(action);
+  const index = persistedActionIndex(action._uiId);
+  if (index < 0) return true;
+  return JSON.stringify(comparableAction(action))
+    !== JSON.stringify(comparableAction(state.persistedSnapshot.config.actions[index]));
+}
+
+function refreshPendingStatus(message = '未保存の変更', feedback = null) {
+  const pending = hasPendingChanges();
+  state.dirty = state.applyRetry || pending;
+  window.mascotAPI.reportDirtyState(state.dirty);
+  elements.saveState.textContent = state.applyRetry
+    ? (pending ? '保存済み・未保存の変更あり' : '保存済み・反映を再試行')
+    : state.dirty
+      ? message
+      : '保存済み';
+  elements.saveState.classList.toggle('is-dirty', state.dirty);
+  elements.saveState.classList.toggle('is-saved', !state.dirty);
+  elements.feedback.textContent = feedback
+    || (state.applyRetry
+      ? '保存した設定をマスコットへ反映できませんでした。もう一度保存すると再試行できます。'
+      : state.dirty
+        ? '変更はまだ保存されていません。'
+        : '設定はマスコットへ反映されています。');
+  elements.feedback.classList.toggle('is-error', state.applyRetry);
+  updateSaveButtons();
 }
 
 async function loadConfiguration({ askBeforeDiscard = false } = {}) {
@@ -597,6 +906,7 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
     const recovery = editable?.recovery || { kind: 'none' };
     const needsRecovery = !config || warnings.length > 0;
     elements.recoveryPanel.hidden = !needsRecovery;
+    elements.recoveryHeading.textContent = config ? '設定の確認' : '設定を安全に復旧できます';
     elements.recoveryMessage.textContent = !config
       ? (recovery.message || '設定ファイルを読み込めません。下のボタンから安全に復旧できます。')
       : warnings.join('／');
@@ -606,6 +916,10 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
       state.config = null;
       state.actions = [];
       state.selectedId = null;
+      state.persistedSnapshot = null;
+      state.migrationPending = false;
+      state.loadWarnings = [];
+      state.migrationWarnings = [];
       state.revision = 0;
       renderAll();
       state.dirty = false;
@@ -629,12 +943,27 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
     };
     state.actions = actions;
     state.selectedId = actions[0]?._uiId || null;
+    state.migrationPending = Array.isArray(editable?.pendingMigrations)
+      && editable.pendingMigrations.includes('legacy-movement-speed');
+    state.loadWarnings = warnings;
+    state.migrationWarnings = state.migrationPending
+      ? warnings.filter((warning) => warning.includes('旧速さ設定を上限300'))
+      : [];
+    setPersistedSnapshot(state.config, actions.map((action) => action._uiId));
     state.revision = 0;
     renderAll();
     markLoaded();
     if (warnings.length > 0) {
-      elements.feedback.textContent = '見つからない画像を新しい画像へ差し替えて保存してください。';
+      elements.feedback.textContent = (editable?.missingAssets || []).length > 0
+        ? '見つからない画像を新しい画像へ差し替えて保存してください。'
+        : warnings.join('／');
       elements.feedback.classList.add('is-error');
+    }
+    if (state.migrationPending) {
+      refreshPendingStatus(
+        '旧速さ設定の保存が必要',
+        '設定ファイルには旧速さが残っています。全体保存、または選択中の動作を保存すると、旧速さ設定が300で更新されます。',
+      );
     }
   } catch (error) {
     console.error(error);
@@ -657,7 +986,13 @@ async function recoverConfiguration(strategy) {
     const result = await window.mascotAPI.recoverConfig(strategy);
     if (!result?.ok) throw new Error(result?.error || '設定を復旧できませんでした。');
     recovered = true;
-    showToast(strategy === 'backup' ? '直前の正常な設定へ戻しました。' : '初期設定へ戻しました。');
+    const restoredLegacySpeed = Array.isArray(result.warnings)
+      && result.warnings.some((warning) => warning.includes('旧速さ設定を上限300'));
+    showToast(restoredLegacySpeed
+      ? 'バックアップの旧速さ設定を300にして復元しました。'
+      : strategy === 'backup'
+        ? '直前の正常な設定へ戻しました。'
+        : '初期設定へ戻しました。');
   } catch (error) {
     console.error(error);
     showError(readableError(error));
@@ -671,10 +1006,8 @@ async function recoverConfiguration(strategy) {
 function renderGlobalSettings() {
   const mascot = state.config?.mascot;
   if (!mascot) return;
-  elements.mascotName.value = state.config.name || '';
   elements.mascotSize.value = mascot.size;
   elements.mascotSizeOutput.textContent = `${mascot.size} px`;
-  elements.startPosition.value = mascot.startPosition;
   elements.rememberPosition.checked = mascot.rememberPosition !== false;
 }
 
@@ -698,9 +1031,7 @@ function renderActionList() {
     const selected = action._uiId === state.selectedId;
     const clipping = getActionClipping(action, action.imageTransform);
     const frameIssue = hasFrameIssue(clipping);
-    const warningLabel = clipping?.clipped
-      ? '画像が枠から見切れています'
-      : '画像が枠にぎりぎりです';
+    const warningLabel = '⚠画像が枠からはみ出しています';
     let warning = null;
 
     card.className = 'action-item-card';
@@ -741,8 +1072,9 @@ function renderActionList() {
 
     button.append(thumbnail, copy);
     button.addEventListener('click', () => {
+      const previousId = state.selectedId;
       state.selectedId = action._uiId;
-      renderActionList();
+      updateActionListSelection(previousId, state.selectedId);
       renderEditor();
     });
 
@@ -768,56 +1100,222 @@ function renderActionList() {
     card.append(button, weightLabel);
     item.appendChild(card);
     elements.actionList.appendChild(item);
-    actionCardViews.set(action._uiId, { button, name, weightInput, warning });
+    actionCardViews.set(action._uiId, { card, button, name, weightInput, warning });
   }
+}
+
+function updateActionListSelection(previousId, nextId) {
+  for (const [id, selected] of [[previousId, false], [nextId, true]]) {
+    const view = actionCardViews.get(id);
+    if (!view) continue;
+    view.card.classList.toggle('is-selected', selected);
+    view.button.setAttribute('aria-current', selected ? 'true' : 'false');
+  }
+}
+
+function updateActionCardClipping(action) {
+  const view = actionCardViews.get(action?._uiId);
+  if (!view) return;
+  const frameIssue = hasFrameIssue(getActionClipping(action, action.imageTransform));
+  const displayName = action.name || '名前のない動作';
+  const warningLabel = '⚠画像が枠からはみ出しています';
+  view.button.title = frameIssue ? warningLabel : displayName;
+  if (frameIssue && !view.warning) {
+    view.warning = document.createElement('span');
+    view.warning.className = 'action-clipping-warning';
+    view.warning.textContent = ' ⚠';
+    view.warning.title = warningLabel;
+    view.warning.setAttribute('aria-label', warningLabel);
+  }
+  if (view.warning) {
+    if (frameIssue) view.name.appendChild(view.warning);
+    else view.warning.remove();
+  }
+}
+
+function refreshClippingIndicators() {
+  for (const action of state.actions) updateActionCardClipping(action);
+  const action = selectedAction();
+  const clipping = updateClippingStatus(
+    elements.actionClippingStatus,
+    action,
+    action?.imageTransform,
+  );
+  elements.actionFitInFrame.hidden = !hasFrameIssue(clipping);
+  if (activeImageEditor) {
+    const editorAction = state.actions.find(
+      (candidate) => candidate._uiId === activeImageEditor.actionId,
+    );
+    updateClippingStatus(
+      elements.imageEditorClippingStatus,
+      editorAction,
+      activeImageEditor.transform,
+    );
+  }
+}
+
+function previewScreenGeometry(size = state.config?.mascot?.size) {
+  const screen = window.screen || {};
+  const width = Math.max(1, Math.round(Number(screen.availWidth) || Number(window.innerWidth) || 1024));
+  const height = Math.max(1, Math.round(Number(screen.availHeight) || Number(window.innerHeight) || 768));
+  const maximum = Math.min(Math.max(1, width - SAFE_EDGE_INSET * 2), Math.max(1, height - SAFE_EDGE_INSET * 2));
+  const configured = Number.isFinite(Number(size)) && Number(size) > 0 ? Number(size) : 180;
+  return { width, height, maximum, configured, effective: Math.min(configured, maximum) };
+}
+
+function previewContentBox(element) {
+  const style = window.getComputedStyle?.(element);
+  return {
+    width: Math.max(0, (element.clientWidth || 0)
+      - (parseFloat(style?.paddingLeft) || 0) - (parseFloat(style?.paddingRight) || 0)),
+    height: Math.max(0, (element.clientHeight || 0)
+      - (parseFloat(style?.paddingTop) || 0) - (parseFloat(style?.paddingBottom) || 0)),
+  };
+}
+
+function previewFitRatio(width, height, availableWidth, availableHeight) {
+  return Math.max(0, Math.min(1, availableWidth / width, availableHeight / height));
+}
+
+function previewScaleLabel(geometry, ratio) {
+  const percent = Number((ratio * 100).toFixed(1));
+  const scale = ratio > 1
+    ? `編集用拡大 ${percent}%（実寸ではありません）`
+    : ratio === 1 ? '実寸 100%' : `縮小表示 ${percent}%`;
+  const size = geometry.configured === geometry.effective
+    ? `枠 ${geometry.effective}px`
+    : `設定 ${geometry.configured}px → 画面上限 ${geometry.effective}px`;
+  return `${scale}・${size}`;
+}
+
+function fitMascotPreview(frame, label, container, size, { square = false, magnify = false } = {}) {
+  const geometry = previewScreenGeometry(size);
+  const box = previewContentBox(container);
+  const height = square ? box.width : box.height;
+  if (!box.width || !height) {
+    label.textContent = 'プレビューを配置中…';
+    return;
+  }
+  const ratio = magnify
+    ? Math.min(box.width, height) / geometry.effective
+    : previewFitRatio(geometry.effective, geometry.effective, box.width, height);
+  frame.style.width = `${geometry.effective * ratio}px`;
+  frame.style.height = `${geometry.effective * ratio}px`;
+  label.textContent = previewScaleLabel(geometry, ratio);
+}
+
+function fitActionMascotPreview() {
+  const geometry = previewScreenGeometry();
+  const box = previewContentBox(elements.imageControlStack);
+  const availableWidth = Math.min(MAX_ACTION_PREVIEW_SIZE, Math.max(0, box.width - 44));
+  const availableHeight = MAX_ACTION_PREVIEW_SIZE;
+  if (!availableWidth || !box.width) {
+    elements.actionPreviewScale.textContent = 'プレビューを配置中…';
+    return;
+  }
+  const ratio = previewFitRatio(geometry.effective, geometry.effective, availableWidth, availableHeight);
+  const size = geometry.effective * ratio;
+  elements.actionPreviewFrame.style.width = `${size}px`;
+  elements.actionPreviewFrame.style.height = `${size}px`;
+  elements.actionPreviewScale.textContent = previewScaleLabel(geometry, ratio);
+}
+
+function setPreviewSource(image, url) {
+  // Avoid restarting GIFs when only layout or transforms change.
+  if (image.dataset.previewSource === (url || '')) return;
+  image.dataset.previewSource = url || '';
+  if (url) image.src = url;
+  else image.removeAttribute('src');
+}
+
+function effectSceneGeometry(size, effect, image) {
+  const geometry = previewScreenGeometry(size);
+  const mascot = geometry.effective;
+  const effectWidth = effect?._assetUrl ? Number(effect.size) || 32 : 0;
+  const effectHeight = effectWidth * ((image.naturalHeight || 1) / (image.naturalWidth || 1));
+  const centerX = mascot / 2 + (Number(effect?.offsetX) || 0);
+  const centerY = mascot - (Number(effect?.offsetY) || 0);
+  const left = effectWidth ? Math.min(0, centerX - effectWidth / 2) : 0;
+  const top = effectWidth ? Math.min(0, centerY - effectHeight / 2) : 0;
+  const right = effectWidth ? Math.max(mascot, centerX + effectWidth / 2) : mascot;
+  const bottom = effectWidth ? Math.max(mascot, centerY + effectHeight / 2) : mascot;
+  return { ...geometry, left, top, width: right - left, height: bottom - top, effectWidth, centerX, centerY };
+}
+
+function renderPreviewScene(source, views, actual = false) {
+  const { action, transform = action.imageTransform, size, effect } = source;
+  setPreviewSource(views.image, action._assetUrl);
+  applyImageTransform(views.image, transform);
+  setPreviewSource(views.effect, effect?._assetUrl);
+  views.effect.hidden = !effect?._assetUrl;
+  const geometry = effectSceneGeometry(size, effect, views.effect);
+  const box = previewContentBox(views.stage);
+  const ratio = actual ? 1 : previewFitRatio(geometry.width, geometry.height, box.width, box.height);
+  if (!actual && !ratio) {
+    views.label.textContent = 'プレビューを配置中…';
+    return;
+  }
+  if (actual) {
+    views.stage.style.width = `${geometry.width}px`;
+    views.stage.style.height = `${geometry.height}px`;
+  }
+  const left = (actual ? 0 : (box.width - geometry.width * ratio) / 2) - geometry.left * ratio;
+  const top = (actual ? 0 : (box.height - geometry.height * ratio) / 2) - geometry.top * ratio;
+  Object.assign(views.mascot.style, {
+    width: `${geometry.effective * ratio}px`, height: `${geometry.effective * ratio}px`,
+    left: `${left}px`, top: `${top}px`,
+  });
+  Object.assign(views.effect.style, {
+    width: `${geometry.effectWidth * ratio}px`,
+    left: `${left + geometry.centerX * ratio}px`, top: `${top + geometry.centerY * ratio}px`,
+  });
+  views.label.textContent = previewScaleLabel(geometry, ratio);
 }
 
 function renderEffectLivePreview() {
   const action = selectedAction();
-  const effect = action?.effect;
-  if (!action || !effect || elements.effectSettings.hidden) {
+  if (!action?.effect || elements.effectSettings.hidden) {
     elements.effectLiveImage.hidden = true;
     return;
   }
+  renderPreviewScene({ action, effect: action.effect }, {
+    stage: elements.effectLivePreview, mascot: elements.effectLiveMascot,
+    image: elements.effectLiveMascotImage, effect: elements.effectLiveImage, label: elements.effectPreviewScale,
+  });
+}
 
-  const stageWidth = elements.effectLivePreview.clientWidth || 360;
-  const stageHeight = elements.effectLivePreview.clientHeight || 300;
-  const actualMascotSize = Math.max(48, numberOr(state.config?.mascot?.size, 180));
-  const previewMascotSize = Math.min(180, stageWidth * 0.5, stageHeight * 0.62);
-  const previewRatio = previewMascotSize / actualMascotSize;
-  const mascotLeft = (stageWidth - previewMascotSize) / 2;
-  const mascotTop = Math.max(42, (stageHeight - previewMascotSize) / 2 + 8);
+function renderActualSizePreview() {
+  if (!elements.actualSizeDialog.open || !actualSizeSource) return;
+  const source = actualSizeSource();
+  if (!source?.action) return;
+  renderPreviewScene(source, {
+    stage: elements.actualSizeScene, mascot: elements.actualSizeMascot,
+    image: elements.actualSizeImage, effect: elements.actualSizeEffect, label: elements.actualSizeScale,
+  }, true);
+}
 
-  elements.effectLiveMascot.style.width = `${previewMascotSize}px`;
-  elements.effectLiveMascot.style.height = `${previewMascotSize}px`;
-  elements.effectLiveMascot.style.left = `${mascotLeft}px`;
-  elements.effectLiveMascot.style.top = `${mascotTop}px`;
-  if (action._assetUrl) {
-    elements.effectLiveMascotImage.src = action._assetUrl;
-    applyImageTransform(elements.effectLiveMascotImage, action.imageTransform);
-  } else {
-    elements.effectLiveMascotImage.removeAttribute('src');
+function openActualSizePreview(source) {
+  actualSizeSource = source;
+  showDialog(elements.actualSizeDialog);
+  renderActualSizePreview();
+  elements.actualSizeViewport.scrollLeft = 0;
+  elements.actualSizeViewport.scrollTop = 0;
+  requestAnimationFrame(renderActualSizePreview);
+}
+
+function closeActualSizePreview() {
+  actualSizeSource = null;
+  if (elements.actualSizeDialog.open) elements.actualSizeDialog.close();
+}
+
+function refreshPreviewGeometry() {
+  if (selectedAction()?._assetUrl) {
+    fitActionMascotPreview();
   }
-
-  if (!effect._assetUrl) {
-    elements.effectLiveImage.hidden = true;
-    return;
-  }
-
-  const effectSize = Math.max(4, numberOr(effect.size, 32)) * previewRatio;
-  const effectLeft = mascotLeft
-    + previewMascotSize / 2
-    + numberOr(effect.offsetX, 0) * previewRatio;
-  const effectTop = mascotTop
-    + previewMascotSize
-    - numberOr(effect.offsetY, 12) * previewRatio;
-
-  elements.effectLiveImage.src = effect._assetUrl;
-  elements.effectLiveImage.hidden = false;
-  elements.effectLiveImage.style.width = `${effectSize}px`;
-  elements.effectLiveImage.style.left = `${effectLeft}px`;
-  elements.effectLiveImage.style.top = `${effectTop}px`;
-  elements.effectLiveImage.title = `横 ${numberOr(effect.offsetX, 0)} px・縦 ${numberOr(effect.offsetY, 12)} px`;
+  if (elements.imageEditorDialog.open) activeImageEditor?.refreshGeometry();
+  if (elements.sizeManagerDialog.open) refreshSizeManagerPreviews?.();
+  renderEffectLivePreview();
+  renderActualSizePreview();
 }
 
 function currentActionMeasurement(action) {
@@ -832,7 +1330,7 @@ function getActionClipping(action, transform) {
   return measurement ? computeClipping(measurement, transform) : null;
 }
 
-function updateClippingStatus(element, action, transform, { explainClipping = false } = {}) {
+function updateClippingStatus(element, action, transform) {
   const entry = action && actionMeasurements.get(action._uiId);
   if (!action?._assetUrl) {
     element.textContent = '';
@@ -850,12 +1348,9 @@ function updateClippingStatus(element, action, transform, { explainClipping = fa
     return null;
   }
   const clipping = computeClipping(entry.measurement, transform);
-  const status = clipping.clipped
-    ? formatClippingStatus(clipping)
-    : clipping.tight.length > 0
-      ? formatTightStatus(clipping)
-      : '見切れなし';
-  element.textContent = `${status}${clipping.clipped && explainClipping ? '。枠からはみ出した部分は、表示されません。' : ''}`;
+  element.textContent = clipping.clipped
+    ? '⚠画像が枠からはみ出しています'
+    : '見切れなし';
   element.classList.toggle('is-warning', hasFrameIssue(clipping));
   return clipping;
 }
@@ -883,9 +1378,26 @@ function fitActionIntoFrame(action) {
 
 function renderEditor() {
   const action = selectedAction();
+  const actionId = action?._uiId ?? null;
+  if (
+    actionId !== lastRenderedEditorActionId
+    || action?.movement?.type === 'still'
+    || !action?._assetUrl
+  ) {
+    stopMovementSpeedPreview(
+      action?.movement?.type === 'still'
+        ? 'この動作はその場に留まるため、速度プレビューはありません。'
+        : action && !action._assetUrl
+          ? '画像を設定すると速度プレビューを表示できます。'
+          : '速さを変更するとプレビューします。',
+    );
+  }
+  lastRenderedEditorActionId = actionId;
   const hasAction = Boolean(action);
   elements.emptyState.hidden = hasAction;
   elements.actionEditor.hidden = !hasAction;
+  elements.actionDropzone.classList.toggle('has-image', Boolean(action?._assetUrl));
+  updateSaveButtons();
   if (!action) {
     elements.actionClippingStatus.textContent = '';
     elements.actionFitInFrame.hidden = true;
@@ -899,7 +1411,12 @@ function renderEditor() {
 
   setImagePreview(elements.actionPreview, elements.actionPlaceholder, action._assetUrl);
   elements.actionPreviewFrame.hidden = !action._assetUrl;
+  elements.actionPreviewMarker.hidden = !action._assetUrl;
   applyImageTransform(elements.actionPreview, action.imageTransform);
+  elements.actionActualSize.disabled = !action._assetUrl;
+  elements.actionPreviewScale.hidden = !action._assetUrl;
+  refreshPreviewGeometry();
+  requestAnimationFrame(refreshPreviewGeometry);
   elements.imageEditButton.disabled = !action._assetUrl;
   const clipping = updateClippingStatus(elements.actionClippingStatus, action, action.imageTransform);
   elements.actionFitInFrame.hidden = !hasFrameIssue(clipping);
@@ -961,14 +1478,8 @@ function updateActionName() {
     return;
   }
   const displayName = action.name || '名前のない動作';
-  const clipping = getActionClipping(action, action.imageTransform);
-  const frameIssue = hasFrameIssue(clipping);
-  const warningLabel = clipping?.clipped
-    ? '画像が枠から見切れています'
-    : '画像が枠にぎりぎりです';
-  view.button.title = frameIssue ? warningLabel : displayName;
   view.name.textContent = displayName;
-  if (view.warning && frameIssue) view.name.appendChild(view.warning);
+  updateActionCardClipping(action);
   view.weightInput.setAttribute('aria-label', `${displayName}の選ばれやすさ`);
 }
 
@@ -1006,15 +1517,36 @@ function openDurationBulkDialog() {
   }
 
   const duration = selectedAction()?.durationMs;
+  const firstMovingAction = state.actions.find((action) => action.movement?.type !== 'still');
+  elements.durationBulkDurationEnabled.checked = true;
+  elements.durationBulkSpeedEnabled.checked = false;
+  elements.durationBulkMin.disabled = false;
+  elements.durationBulkMax.disabled = false;
+  elements.durationBulkSpeed.disabled = true;
   elements.durationBulkMin.value = numberOr(duration?.[0], DEFAULT_DURATION_MS[0]) / 1000;
   elements.durationBulkMax.value = numberOr(duration?.[1], DEFAULT_DURATION_MS[1]) / 1000;
-  elements.durationBulkCount.textContent = `全${state.actions.length}件の動作の時間が、上書きされます。`;
+  elements.durationBulkSpeed.value = numberOr(firstMovingAction?.movement?.speed, 55);
+  durationBulkRevision = state.revision;
+  updateDurationBulkCount();
   elements.durationBulkError.textContent = '';
   elements.durationBulkError.hidden = true;
-  elements.durationBulkDialog.showModal();
+  showDialog(elements.durationBulkDialog);
+}
+
+function updateDurationBulkCount() {
+  const movingCount = state.actions.filter((action) => action.movement?.type !== 'still').length;
+  const targets = [];
+  targets.push(elements.durationBulkDurationEnabled.checked
+    ? `表示時間：${state.actions.length}件`
+    : '表示時間：変更しない');
+  targets.push(elements.durationBulkSpeedEnabled.checked
+    ? `速さ：移動する動作${movingCount}件（その場に留まる動作は変更しません）`
+    : '速さ：変更しない');
+  elements.durationBulkCount.textContent = targets.join('。');
 }
 
 function readBulkDuration() {
+  if (!elements.durationBulkDurationEnabled.checked) return null;
   elements.durationBulkError.textContent = '';
   elements.durationBulkError.hidden = true;
   const minimumSeconds = readNumberInput(elements.durationBulkMin.value);
@@ -1052,11 +1584,55 @@ function readBulkDuration() {
   return duration;
 }
 
-async function applyDurationBulk() {
-  const duration = readBulkDuration();
-  if (!duration) return false;
+function readBulkSpeed() {
+  if (!elements.durationBulkSpeedEnabled.checked) return null;
+  const speed = readNumberInput(elements.durationBulkSpeed.value);
+  if (!Number.isFinite(speed) || !Number.isInteger(speed)) {
+    elements.durationBulkError.textContent = '速さを整数で入力してください。';
+    elements.durationBulkError.hidden = false;
+    return null;
+  }
+  if (speed < SETTINGS_RULES.movementSpeed.minimum || speed > SETTINGS_RULES.movementSpeed.maximum) {
+    elements.durationBulkError.textContent = `速さは${SETTINGS_RULES.movementSpeed.minimum}〜${SETTINGS_RULES.movementSpeed.maximum}にしてください。`;
+    elements.durationBulkError.hidden = false;
+    return null;
+  }
+  return speed;
+}
 
-  for (const action of state.actions) action.durationMs = [...duration];
+async function applyDurationBulk() {
+  if (state.busy) return false;
+  elements.durationBulkError.textContent = '';
+  elements.durationBulkError.hidden = true;
+  if (durationBulkRevision !== state.revision) {
+    elements.durationBulkError.textContent = '設定が変更されました。いったん閉じてから、もう一度開いてください。';
+    elements.durationBulkError.hidden = false;
+    return false;
+  }
+  const applyDuration = elements.durationBulkDurationEnabled.checked;
+  const applySpeed = elements.durationBulkSpeedEnabled.checked;
+  if (!applyDuration && !applySpeed) {
+    elements.durationBulkError.textContent = '表示時間または速さを選択してください。';
+    elements.durationBulkError.hidden = false;
+    return false;
+  }
+  const duration = readBulkDuration();
+  if (applyDuration && !duration) return false;
+  const speed = readBulkSpeed();
+  if (applySpeed && speed === null) return false;
+  const movingActions = state.actions.filter((action) => action.movement?.type !== 'still');
+  if (applySpeed && movingActions.length === 0) {
+    elements.durationBulkError.textContent = '速さを変更できる動作がありません。「その場に留まる」以外の動作を追加してください。';
+    elements.durationBulkError.hidden = false;
+    return false;
+  }
+
+  if (applyDuration) {
+    for (const action of state.actions) action.durationMs = [...duration];
+  }
+  if (applySpeed) {
+    for (const action of movingActions) action.movement.speed = speed;
+  }
   markDirty();
   elements.durationBulkDialog.close();
   renderActionList();
@@ -1090,6 +1666,7 @@ function moveSelectedAction(direction) {
 }
 
 async function importImage(category, sourcePath = '', operationToken = null) {
+  stopMovementSpeedPreview();
   if (!state.apiAvailable) {
     disableUnavailableEditor();
     return null;
@@ -1114,6 +1691,22 @@ async function importImage(category, sourcePath = '', operationToken = null) {
 
 function isJpegImport(result) {
   return Boolean(result?.isJpeg || /\.jpe?g$/i.test(result?.relativePath || ''));
+}
+
+function stateReferencesAsset(relativePath) {
+  return state.actions.some((action) => (
+    action.file === relativePath || action.effect?.file === relativePath
+  ));
+}
+
+async function discardUnreferencedImportedImage(relativePath, category) {
+  if (!relativePath || stateReferencesAsset(relativePath)) return false;
+  try {
+    return await window.mascotAPI.discardImportedImage(relativePath, category);
+  } catch (error) {
+    console.warn('未使用の取り込み画像を整理できませんでした。', error);
+    return false;
+  }
 }
 
 function rgbToHex({ r, g, b }) {
@@ -1187,17 +1780,40 @@ function makeTransparentImageData(original, background, tolerance, feather) {
     original.width,
     original.height,
   );
+  const toleranceSquared = tolerance * tolerance;
   const featherEnd = tolerance + feather;
+  const featherEndSquared = featherEnd ** 2;
+  const distanceAtMost = (distanceSquared, radius, radiusSquared) => {
+    if (radius < 0) return false;
+    const boundaryMargin = Number.EPSILON
+      * Math.max(1, Math.abs(distanceSquared), Math.abs(radiusSquared))
+      * 8;
+    if (Math.abs(distanceSquared - radiusSquared) <= boundaryMargin) {
+      return Math.sqrt(distanceSquared) <= radius;
+    }
+    return distanceSquared < radiusSquared;
+  };
+  const distanceBelow = (distanceSquared, radius, radiusSquared) => {
+    if (radius < 0) return false;
+    const boundaryMargin = Number.EPSILON
+      * Math.max(1, Math.abs(distanceSquared), Math.abs(radiusSquared))
+      * 8;
+    if (Math.abs(distanceSquared - radiusSquared) <= boundaryMargin) {
+      return Math.sqrt(distanceSquared) < radius;
+    }
+    return distanceSquared < radiusSquared;
+  };
 
   for (let index = 0; index < output.data.length; index += 4) {
     const deltaR = output.data[index] - background.r;
     const deltaG = output.data[index + 1] - background.g;
     const deltaB = output.data[index + 2] - background.b;
-    const distance = Math.sqrt(deltaR ** 2 + deltaG ** 2 + deltaB ** 2);
+    const distanceSquared = deltaR ** 2 + deltaG ** 2 + deltaB ** 2;
 
-    if (distance <= tolerance) {
+    if (distanceAtMost(distanceSquared, tolerance, toleranceSquared)) {
       output.data[index + 3] = 0;
-    } else if (feather > 0 && distance < featherEnd) {
+    } else if (feather > 0 && distanceBelow(distanceSquared, featherEnd, featherEndSquared)) {
+      const distance = Math.sqrt(distanceSquared);
       output.data[index + 3] = Math.round(255 * ((distance - tolerance) / feather));
     } else {
       output.data[index + 3] = 255;
@@ -1347,14 +1963,18 @@ async function openJpegConverter(result, category) {
     };
 
     setSaving(false);
-    elements.jpegDialog.showModal();
+    showDialog(elements.jpegDialog);
   });
 }
 
-async function prepareImportedImage(result, category) {
+async function prepareImportedImage(result, category, convert = openJpegConverter) {
   if (!isJpegImport(result)) return result;
   try {
-    return await openJpegConverter(result, category);
+    const prepared = await convert(result, category);
+    if (!prepared || prepared.relativePath !== result.relativePath) {
+      await discardUnreferencedImportedImage(result.relativePath, category);
+    }
+    return prepared;
   } catch (error) {
     console.error(error);
     showError(`JPGの背景透過を準備できませんでした：${readableError(error)}`);
@@ -1398,13 +2018,20 @@ function setupDropzone(element, category, onImported) {
 
     const file = event.dataTransfer?.files?.[0];
     if (!file) return;
-    const sourcePath = window.mascotAPI.getPathForFile(file);
+    const targetId = state.selectedId;
+    let sourcePath;
+    try {
+      sourcePath = await window.mascotAPI.getPathForFile(file);
+    } catch (error) {
+      console.error(error);
+      showError(`画像の場所を取得できませんでした：${readableError(error)}`);
+      return;
+    }
     if (!sourcePath) {
       showError('画像の場所を取得できませんでした。クリックして画像を選んでください。');
       return;
     }
 
-    const targetId = state.selectedId;
     const prepared = await importAndPrepareImage(category, sourcePath);
     if (prepared) onImported(prepared, targetId);
   });
@@ -1445,10 +2072,11 @@ function applyImportedEffectImage(result, targetId) {
 }
 
 const SIZE_MEASUREMENT_CACHE_TTL_MS = 6000;
+const SIZE_MEASUREMENT_LOAD_TIMEOUT_MS = 6000;
 const SIZE_MEASUREMENT_CACHE_LIMIT = 100;
 const sizeMeasurementCache = new Map();
 
-function loadSizeMeasurementImage(source, timeoutMs = SIZE_MEASUREMENT_CACHE_TTL_MS) {
+function loadSizeMeasurementImage(source, timeoutMs = SIZE_MEASUREMENT_LOAD_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const image = new Image();
     let settled = false;
@@ -1606,8 +2234,9 @@ function requestVisibleContentMeasurements() {
       measurementQueueRequested = false;
       const actionsWithImages = state.actions.filter((action) => action._assetUrl);
       const activeIds = new Set(actionsWithImages.map((action) => action._uiId));
+      const actionsById = new Map(actionsWithImages.map((action) => [action._uiId, action]));
       for (const [id, entry] of actionMeasurements) {
-        const action = actionsWithImages.find((candidate) => candidate._uiId === id);
+        const action = actionsById.get(id);
         if (!activeIds.has(id) || entry.key !== actionMeasurementKey(action)) actionMeasurements.delete(id);
       }
       await mapWithConcurrency(actionsWithImages, 4, async (action) => {
@@ -1619,17 +2248,7 @@ function requestVisibleContentMeasurements() {
       });
     }
   })().then(() => {
-    renderActionList();
-    renderEditor();
-    if (activeImageEditor) {
-      const action = state.actions.find((candidate) => candidate._uiId === activeImageEditor.actionId);
-      updateClippingStatus(
-        elements.imageEditorClippingStatus,
-        action,
-        activeImageEditor.transform,
-        { explainClipping: true },
-      );
-    }
+    refreshClippingIndicators();
   }).catch((error) => {
     console.error('画像の見た目を測定できませんでした。', error);
   }).finally(() => {
@@ -1654,14 +2273,8 @@ function openSizeManager() {
     SETTINGS_RULES.mascotSize.minimum,
     SETTINGS_RULES.mascotSize.maximum,
   );
-  const screen = window.screen || {};
-  const availableWidth = Math.max(1, Math.round(Number(screen.availWidth) || Number(window.innerWidth) || 1024));
-  const availableHeight = Math.max(1, Math.round(Number(screen.availHeight) || Number(window.innerHeight) || 768));
+  const { width: availableWidth, height: availableHeight, maximum: maximumDisplaySize } = previewScreenGeometry(initialMascotSize);
   const shortSide = Math.min(availableWidth, availableHeight);
-  const maximumDisplaySize = Math.min(
-    Math.max(1, availableWidth - SAFE_EDGE_INSET * 2),
-    Math.max(1, availableHeight - SAFE_EDGE_INSET * 2),
-  );
   const effectsAtOpen = new Map(
     state.actions
       .filter((action) => action.effect)
@@ -1678,6 +2291,14 @@ function openSizeManager() {
   let targetSize = null;
   let alignmentRange = null;
   const cardMetrics = new Map();
+  const cardPreviews = new Map();
+  refreshSizeManagerPreviews = () => {
+    if (!isSizeManagerGenerationCurrent(generation)) return;
+    for (const { preview, label, card } of cardPreviews.values()) {
+      fitMascotPreview(preview, label, card, workingMascotSize, { square: true });
+    }
+    renderActualSizePreview();
+  };
   const formatDecimal = (value) => String(Number(value.toFixed(1)));
   const formatPercent = (value) => `${formatDecimal(value)}%`;
 
@@ -1755,6 +2376,7 @@ function openSizeManager() {
     elements.sizeManagerSizeWarning.textContent = `画面に収まらないため、${maximumDisplaySize}pxに縮めて表示されます。`;
     updateScreenDiagram();
     updateCardMetrics();
+    refreshSizeManagerPreviews();
   };
 
   const setWorkingMascotSize = (value, source = null) => {
@@ -1877,6 +2499,7 @@ function openSizeManager() {
   const renderCards = () => {
     elements.sizeManagerGrid.replaceChildren();
     cardMetrics.clear();
+    cardPreviews.clear();
 
     for (const action of state.actions) {
       const card = document.createElement('article');
@@ -1891,6 +2514,9 @@ function openSizeManager() {
       const slider = document.createElement('input');
       const metrics = document.createElement('p');
       const clippingWarning = document.createElement('p');
+      const previewLabel = document.createElement('p');
+      const actualButton = document.createElement('button');
+      const previewToolbar = document.createElement('div');
       const transform = working.get(action._uiId);
 
       card.className = 'size-card';
@@ -1919,6 +2545,9 @@ function openSizeManager() {
         image.alt = `${action.name || '動作'}の表示サイズ`;
         applyImageTransform(image, transform);
         preview.appendChild(image);
+        image.addEventListener('load', () => {
+          if (isSizeManagerGenerationCurrent(generation)) refreshSizeManagerPreviews?.();
+        });
         attachImagePan(preview, transform, () => {
           applyImageTransform(image, transform);
           metrics.textContent = visualMetric(action);
@@ -1934,8 +2563,8 @@ function openSizeManager() {
       controlOutput.textContent = `${Math.round(transform.scale * 100)}%`;
       controlLabel.append(controlText, controlOutput);
       slider.type = 'range';
-      slider.min = '0.3';
-      slider.max = '3';
+      slider.min = String(IMAGE_SCALE_RULE.minimum);
+      slider.max = String(IMAGE_SCALE_RULE.maximum);
       slider.step = '0.01';
       slider.value = String(transform.scale);
       slider.disabled = !action._assetUrl;
@@ -1946,13 +2575,17 @@ function openSizeManager() {
         const measurement = measurements.get(action._uiId);
         const clipping = measurement ? computeClipping(measurement, transform) : null;
         clippingWarning.hidden = !hasFrameIssue(clipping);
-        clippingWarning.textContent = clipping?.clipped ? '⚠ 見切れ' : '⚠ ぎりぎり';
+        clippingWarning.textContent = '⚠画像が枠からはみ出しています';
       };
       metrics.className = 'size-card-metrics';
       metrics.textContent = visualMetric(action);
       cardMetrics.set(action._uiId, metrics);
       slider.addEventListener('input', () => {
-        transform.scale = clamp(numberOr(slider.value, 1), 0.3, 3);
+        transform.scale = clamp(
+          numberOr(slider.value, 1),
+          IMAGE_SCALE_RULE.minimum,
+          IMAGE_SCALE_RULE.maximum,
+        );
         controlOutput.textContent = `${Math.round(transform.scale * 100)}%`;
         const image = preview.querySelector('img');
         if (image) applyImageTransform(image, transform);
@@ -1962,13 +2595,30 @@ function openSizeManager() {
       });
       controls.append(controlLabel, slider, metrics);
       card.append(header, preview, controls, clippingWarning);
+      previewLabel.className = 'preview-scale';
+      previewLabel.title = '表示枠の上限は、設定画面を開いている画面を基準にしています。';
+      actualButton.className = 'secondary-button compact-button';
+      actualButton.type = 'button';
+      actualButton.textContent = '実寸で見る';
+      actualButton.disabled = !action._assetUrl;
+      actualButton.addEventListener('click', () => openActualSizePreview(() => ({
+        action, transform: working.get(action._uiId), size: workingMascotSize,
+      })));
+      previewToolbar.className = 'size-card-preview-toolbar';
+      previewToolbar.append(previewLabel, actualButton);
+      card.append(previewToolbar);
+      cardPreviews.set(action._uiId, { preview, label: previewLabel, card });
       elements.sizeManagerGrid.appendChild(card);
       updateClippingWarning();
     }
     updateFitClippedButton();
+    refreshSizeManagerPreviews();
   };
 
   const closeDialog = () => {
+    closeActualSizePreview();
+    refreshSizeManagerPreviews = null;
+    cardPreviews.clear();
     invalidateSizeManagerGeneration(generation);
     if (elements.sizeManagerDialog.open) elements.sizeManagerDialog.close();
   };
@@ -2008,7 +2658,11 @@ function openSizeManager() {
   elements.sizeManagerTargetPercent.disabled = true;
   targetSize = null;
   renderCards();
-  elements.sizeManagerDialog.showModal();
+  showDialog(elements.sizeManagerDialog);
+  refreshSizeManagerPreviews();
+  requestAnimationFrame(() => {
+    if (isSizeManagerGenerationCurrent(generation)) refreshSizeManagerPreviews?.();
+  });
 
   mapWithConcurrency(actionsWithImages, 4, async (action) => {
     try {
@@ -2046,11 +2700,23 @@ function openSizeManager() {
       if (!measurement) continue;
       const current = working.get(action._uiId);
       const baseSize = Math.max(measurement.baseWidth, measurement.baseHeight);
-      const scale = clamp(target / Math.max(0.001, baseSize), 0.3, 3);
+      const scale = clamp(
+        target / Math.max(0.001, baseSize),
+        IMAGE_SCALE_RULE.minimum,
+        IMAGE_SCALE_RULE.maximum,
+      );
       current.scale = scale;
       const adjustedMeasurement = measurementForTransform(measurement, current);
-      current.offsetX = clamp(-100 * scale * (adjustedMeasurement.centerX - 0.5), -100, 100);
-      current.offsetY = clamp(-100 * scale * (adjustedMeasurement.centerY - 0.5), -100, 100);
+      current.offsetX = clamp(
+        -100 * scale * (adjustedMeasurement.centerX - 0.5),
+        IMAGE_OFFSET_RULE.minimum,
+        IMAGE_OFFSET_RULE.maximum,
+      );
+      current.offsetY = clamp(
+        -100 * scale * (adjustedMeasurement.centerY - 0.5),
+        IMAGE_OFFSET_RULE.minimum,
+        IMAGE_OFFSET_RULE.maximum,
+      );
       Object.assign(current, fitTransformToFrame(measurement, current));
     }
     elements.sizeManagerStatus.textContent = `見た目の大きさを${formatPercent(target * 100)}に、できる範囲で揃えました。`;
@@ -2122,21 +2788,40 @@ function openImageEditor() {
   const working = normalizeImageTransform(action.imageTransform);
   activeImageEditor = { actionId: action._uiId, transform: working };
   elements.imageEditorPreview.src = action._assetUrl;
+  elements.imageEditorMagnify.checked = false;
+  const refreshGeometry = () => fitMascotPreview(
+    elements.imageEditorFrame, elements.imageEditorPreviewScale, elements.imageEditorStage,
+    state.config?.mascot?.size, { magnify: elements.imageEditorMagnify.checked },
+  );
+  activeImageEditor.refreshGeometry = refreshGeometry;
 
   const updatePreview = () => {
     working.flipX = elements.imageEditorFlipX.checked;
-    working.scale = clamp(numberOr(elements.imageScale.value, 1), 0.3, 3);
-    working.offsetX = clamp(numberOr(elements.imageOffsetX.value, 0), -100, 100);
-    working.offsetY = clamp(numberOr(elements.imageOffsetY.value, 0), -100, 100);
+    working.scale = clamp(
+      numberOr(elements.imageScale.value, 1),
+      IMAGE_SCALE_RULE.minimum,
+      IMAGE_SCALE_RULE.maximum,
+    );
+    working.offsetX = clamp(
+      numberOr(elements.imageOffsetX.value, 0),
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
+    );
+    working.offsetY = clamp(
+      numberOr(elements.imageOffsetY.value, 0),
+      IMAGE_OFFSET_RULE.minimum,
+      IMAGE_OFFSET_RULE.maximum,
+    );
     elements.imageScaleOutput.textContent = `${Math.round(working.scale * 100)}%`;
     elements.imageOffsetXOutput.textContent = formatImageOffset(working.offsetX);
     elements.imageOffsetYOutput.textContent = formatImageOffset(working.offsetY);
     applyImageTransform(elements.imageEditorPreview, working);
+    refreshGeometry();
+    renderActualSizePreview();
     updateClippingStatus(
       elements.imageEditorClippingStatus,
       action,
       working,
-      { explainClipping: true },
     );
   };
 
@@ -2149,11 +2834,14 @@ function openImageEditor() {
   };
 
   const closeDialog = () => {
+    closeActualSizePreview();
     if (activeImageEditor?.actionId === action._uiId) activeImageEditor = null;
     if (elements.imageEditorDialog.open) elements.imageEditorDialog.close();
   };
 
   elements.imageScale.oninput = updatePreview;
+  elements.imageEditorMagnify.onchange = refreshGeometry;
+  elements.imageEditorActualSize.onclick = () => openActualSizePreview(() => ({ action, transform: working }));
   elements.imageOffsetX.oninput = updatePreview;
   elements.imageOffsetY.oninput = updatePreview;
   elements.imageEditorFlipX.onchange = updatePreview;
@@ -2179,7 +2867,11 @@ function openImageEditor() {
     updatePreview();
   });
   setControls(working);
-  elements.imageEditorDialog.showModal();
+  showDialog(elements.imageEditorDialog);
+  refreshGeometry();
+  requestAnimationFrame(() => {
+    if (activeImageEditor?.transform === working) refreshGeometry();
+  });
 }
 
 function assertEditableNumber(value, fallback, label, rule) {
@@ -2203,54 +2895,97 @@ function validateEditableStateForSave() {
   if (!ALLOWED_START_POSITIONS.has(mascot.startPosition || 'bottom-right')) {
     throw new Error('最初の位置が対応していません。');
   }
-  if (state.actions.length > 100) throw new Error('動作は100件以下にしてください。');
+  if (state.actions.length > MAX_ACTIONS) {
+    throw new Error(`動作は${MAX_ACTIONS}件以下にしてください。`);
+  }
 
-  state.actions.forEach((action, index) => {
-    const label = `動作${index + 1}`;
-    assertEditableNumber(action.weight, 1, `${label}の選ばれやすさ`, SETTINGS_RULES.weight);
-    const duration = Array.isArray(action.durationMs) ? action.durationMs : DEFAULT_DURATION_MS;
-    const minimum = assertEditableNumber(
-      Math.round(readNumberInput(duration[0], DEFAULT_DURATION_MS[0])),
-      DEFAULT_DURATION_MS[0],
-      `${label}の最短時間`,
-      SETTINGS_RULES.durationMs,
+  state.actions.forEach((action, index) => validateEditableAction(action, index));
+}
+
+function validateEditableAction(action, index) {
+  const label = `動作${index + 1}`;
+  assertEditableNumber(action.weight, 1, `${label}の選ばれやすさ`, SETTINGS_RULES.weight);
+  const duration = Array.isArray(action.durationMs) ? action.durationMs : DEFAULT_DURATION_MS;
+  const minimum = assertEditableNumber(
+    Math.round(readNumberInput(duration[0], DEFAULT_DURATION_MS[0])),
+    DEFAULT_DURATION_MS[0],
+    `${label}の最短時間`,
+    SETTINGS_RULES.durationMs,
+  );
+  const maximum = assertEditableNumber(
+    Math.round(readNumberInput(duration[1], DEFAULT_DURATION_MS[1])),
+    DEFAULT_DURATION_MS[1],
+    `${label}の最長時間`,
+    SETTINGS_RULES.durationMs,
+  );
+  if (minimum > maximum) throw new Error(`${label}の最短時間は最長時間以下にしてください。`);
+  if (!ALLOWED_FLIPS.has(action.flipMode || 'direction')) throw new Error(`${label}の反転設定が対応していません。`);
+  const transform = action.imageTransform || {};
+  if (transform.flipX !== undefined && typeof transform.flipX !== 'boolean') {
+    throw new Error(`${label}の画像反転設定はtrueまたはfalseにしてください。`);
+  }
+  assertEditableNumber(transform.scale, 1, `${label}の画像倍率`, SETTINGS_RULES.imageScale);
+  assertEditableNumber(transform.offsetX, 0, `${label}の画像横位置`, SETTINGS_RULES.imageOffset);
+  assertEditableNumber(transform.offsetY, 0, `${label}の画像縦位置`, SETTINGS_RULES.imageOffset);
+  const movement = action.movement || {};
+  if (!ALLOWED_MOVEMENTS.has(movement.type || 'still')) throw new Error(`${label}の動き方が対応していません。`);
+  assertEditableNumber(movement.speed, 0, `${label}の速さ`, SETTINGS_RULES.movementSpeed);
+  if (action.effect) {
+    assertEditableNumber(
+      Math.round(readNumberInput(action.effect.intervalMs, 450)),
+      450,
+      `${label}のエフェクト間隔`,
+      SETTINGS_RULES.effectIntervalMs,
     );
-    const maximum = assertEditableNumber(
-      Math.round(readNumberInput(duration[1], DEFAULT_DURATION_MS[1])),
-      DEFAULT_DURATION_MS[1],
-      `${label}の最長時間`,
-      SETTINGS_RULES.durationMs,
+    assertEditableNumber(action.effect.size, 32, `${label}のエフェクトサイズ`, SETTINGS_RULES.effectSize);
+    assertEditableNumber(
+      Math.round(readNumberInput(action.effect.lifetimeMs, 1800)),
+      1800,
+      `${label}のエフェクト表示時間`,
+      SETTINGS_RULES.effectLifetimeMs,
     );
-    if (minimum > maximum) throw new Error(`${label}の最短時間は最長時間以下にしてください。`);
-    if (!ALLOWED_FLIPS.has(action.flipMode || 'direction')) throw new Error(`${label}の反転設定が対応していません。`);
-    const transform = action.imageTransform || {};
-    if (transform.flipX !== undefined && typeof transform.flipX !== 'boolean') {
-      throw new Error(`${label}の画像反転設定はtrueまたはfalseにしてください。`);
-    }
-    assertEditableNumber(transform.scale, 1, `${label}の画像倍率`, SETTINGS_RULES.imageScale);
-    assertEditableNumber(transform.offsetX, 0, `${label}の画像横位置`, SETTINGS_RULES.imageOffset);
-    assertEditableNumber(transform.offsetY, 0, `${label}の画像縦位置`, SETTINGS_RULES.imageOffset);
-    const movement = action.movement || {};
-    if (!ALLOWED_MOVEMENTS.has(movement.type || 'still')) throw new Error(`${label}の動き方が対応していません。`);
-    assertEditableNumber(movement.speed, 0, `${label}の速さ`, SETTINGS_RULES.movementSpeed);
-    if (action.effect) {
-      assertEditableNumber(
-        Math.round(readNumberInput(action.effect.intervalMs, 450)),
-        450,
-        `${label}のエフェクト間隔`,
-        SETTINGS_RULES.effectIntervalMs,
-      );
-      assertEditableNumber(action.effect.size, 32, `${label}のエフェクトサイズ`, SETTINGS_RULES.effectSize);
-      assertEditableNumber(
-        Math.round(readNumberInput(action.effect.lifetimeMs, 1800)),
-        1800,
-        `${label}のエフェクト表示時間`,
-        SETTINGS_RULES.effectLifetimeMs,
-      );
-      assertEditableNumber(action.effect.offsetX, 0, `${label}のエフェクト横位置`, SETTINGS_RULES.effectOffset);
-      assertEditableNumber(action.effect.offsetY, 12, `${label}のエフェクト縦位置`, SETTINGS_RULES.effectOffset);
-    }
-  });
+    assertEditableNumber(action.effect.offsetX, 0, `${label}のエフェクト横位置`, SETTINGS_RULES.effectOffset);
+    assertEditableNumber(action.effect.offsetY, 12, `${label}のエフェクト縦位置`, SETTINGS_RULES.effectOffset);
+  }
+}
+
+function serializeAction(action, index) {
+  validateEditableAction(action, index);
+  const name = String(action.name || '').trim();
+  if (!name) throw new Error(`動作${index + 1}に名前を付けてください。`);
+  if (!action.file) throw new Error(`「${name}」へキャラクター画像を追加してください。`);
+
+  const result = {
+    name,
+    file: action.file,
+    weight: positiveWeight(action.weight, 1),
+    durationMs: [
+      Math.round(numberOr(action.durationMs?.[0], DEFAULT_DURATION_MS[0])),
+      Math.round(numberOr(action.durationMs?.[1], DEFAULT_DURATION_MS[1])),
+    ],
+    flipMode: ALLOWED_FLIPS.has(action.flipMode) ? action.flipMode : 'direction',
+    imageTransform: normalizeImageTransform(action.imageTransform),
+    movement: {
+      type: action.movement?.type || 'still',
+      speed: numberOr(action.movement?.speed, 0),
+    },
+  };
+
+  if (action.effect) {
+    if (!action.effect.file) throw new Error(`「${name}」へエフェクト画像を追加するか、エフェクトをOFFにしてください。`);
+    result.effect = {
+      file: action.effect.file,
+      intervalMs: Math.round(numberOr(action.effect.intervalMs, 450)),
+      size: numberOr(action.effect.size, 32),
+      lifetimeMs: Math.round(numberOr(action.effect.lifetimeMs, 1800)),
+      offsetX: numberOr(action.effect.offsetX, 0),
+      offsetY: numberOr(action.effect.offsetY, 12),
+      coordinateVersion: 2,
+      emitWhileStill: Boolean(action.effect.emitWhileStill),
+    };
+  }
+
+  return result;
 }
 
 function serializeConfig() {
@@ -2259,43 +2994,7 @@ function serializeConfig() {
   if (state.actions.length > MAX_ACTIONS) throw new Error(`動作は${MAX_ACTIONS}件までにしてください。`);
   validateEditableStateForSave();
 
-  const actions = state.actions.map((action, index) => {
-    const name = String(action.name || '').trim();
-    if (!name) throw new Error(`動作${index + 1}に名前を付けてください。`);
-    if (!action.file) throw new Error(`「${name}」へキャラクター画像を追加してください。`);
-
-    const result = {
-      name,
-      file: action.file,
-      weight: positiveWeight(action.weight, 1),
-      durationMs: [
-        Math.round(numberOr(action.durationMs?.[0], DEFAULT_DURATION_MS[0])),
-        Math.round(numberOr(action.durationMs?.[1], DEFAULT_DURATION_MS[1])),
-      ],
-      flipMode: ['direction', 'none', 'random'].includes(action.flipMode) ? action.flipMode : 'direction',
-      imageTransform: normalizeImageTransform(action.imageTransform),
-      movement: {
-        type: action.movement?.type || 'still',
-        speed: numberOr(action.movement?.speed, 0),
-      },
-    };
-
-    if (action.effect) {
-      if (!action.effect.file) throw new Error(`「${name}」へエフェクト画像を追加するか、エフェクトをOFFにしてください。`);
-      result.effect = {
-        file: action.effect.file,
-        intervalMs: Math.round(numberOr(action.effect.intervalMs, 450)),
-        size: numberOr(action.effect.size, 32),
-        lifetimeMs: Math.round(numberOr(action.effect.lifetimeMs, 1800)),
-        offsetX: numberOr(action.effect.offsetX, 0),
-        offsetY: numberOr(action.effect.offsetY, 12),
-        coordinateVersion: 2,
-        emitWhileStill: Boolean(action.effect.emitWhileStill),
-      };
-    }
-
-    return result;
-  });
+  const actions = state.actions.map((action, index) => serializeAction(action, index));
 
   return {
     name: String(state.config.name || 'マスコット').trim() || 'マスコット',
@@ -2309,12 +3008,31 @@ function serializeConfig() {
   };
 }
 
-function applyNormalizedConfigToState(config) {
+function editableActionFromConfig(action, previous, uiId) {
+  const effect = action.effect
+    ? {
+        ...action.effect,
+        _assetUrl: previous?.effect?.file === action.effect.file
+          ? previous.effect._assetUrl
+          : null,
+      }
+    : undefined;
+  return {
+    ...action,
+    imageTransform: normalizeImageTransform(action.imageTransform),
+    _uiId: uiId,
+    _assetUrl: previous?.file === action.file ? previous._assetUrl : null,
+    weight: positiveWeight(action.weight, 1),
+    flipMode: ALLOWED_FLIPS.has(action.flipMode) ? action.flipMode : 'direction',
+    movement: { type: 'still', speed: 0, ...(action.movement || {}) },
+    durationMs: Array.isArray(action.durationMs) ? [...action.durationMs] : [...DEFAULT_DURATION_MS],
+    ...(effect ? { effect } : {}),
+  };
+}
+
+function applyNormalizedConfigToState(config, actionIds) {
   const previousActions = state.actions;
-  const selectedIndex = Math.max(
-    0,
-    previousActions.findIndex((action) => action._uiId === state.selectedId),
-  );
+  const previousById = new Map(previousActions.map((action) => [action._uiId, action]));
 
   state.config = {
     ...config,
@@ -2327,51 +3045,25 @@ function applyNormalizedConfigToState(config) {
     },
   };
   state.actions = (config.actions || []).map((action, index) => {
-    const previous = previousActions[index];
-    const assetUrl = previous?.file === action.file ? previous._assetUrl : null;
-    const effect = action.effect
-      ? {
-          ...action.effect,
-          _assetUrl: previous?.effect?.file === action.effect.file
-            ? previous.effect._assetUrl
-            : null,
-        }
-      : undefined;
-
-    return {
-      ...action,
-      imageTransform: normalizeImageTransform(action.imageTransform),
-      _uiId: previous?._uiId || newId(),
-      _assetUrl: assetUrl,
-      movement: { type: 'still', speed: 0, ...(action.movement || {}) },
-      durationMs: Array.isArray(action.durationMs) ? action.durationMs : [...DEFAULT_DURATION_MS],
-      ...(effect ? { effect } : {}),
-    };
+    const uiId = actionIds[index] || newId();
+    return editableActionFromConfig(action, previousById.get(uiId), uiId);
   });
-  state.selectedId = state.actions[Math.min(selectedIndex, state.actions.length - 1)]?._uiId || null;
+  if (!state.actions.some((action) => action._uiId === state.selectedId)) {
+    state.selectedId = state.actions[0]?._uiId || null;
+  }
   renderAll();
 }
 
 function markApplyRetry(message) {
-  state.dirty = true;
-  window.mascotAPI.reportDirtyState(true);
-  elements.saveState.textContent = '保存済み・反映を再試行';
-  elements.saveState.classList.add('is-dirty');
-  elements.saveState.classList.remove('is-saved');
-  elements.feedback.textContent = message;
-  elements.feedback.classList.add('is-error');
-  elements.saveButton.disabled = state.busy;
+  state.applyRetry = true;
+  refreshPendingStatus('未保存の変更', message);
 }
 
 function markNewerChangesPending() {
-  state.dirty = true;
-  window.mascotAPI.reportDirtyState(true);
-  elements.saveState.textContent = '新しい変更あり';
-  elements.saveState.classList.add('is-dirty');
-  elements.saveState.classList.remove('is-saved');
-  elements.feedback.textContent = '保存中に新しい変更がありました。もう一度「保存して反映」を押してください。';
-  elements.feedback.classList.remove('is-error');
-  elements.saveButton.disabled = state.busy;
+  refreshPendingStatus(
+    '未保存の変更',
+    '保存中に新しい変更がありました。もう一度「保存して反映」を押してください。',
+  );
 }
 
 async function saveConfiguration() {
@@ -2383,6 +3075,7 @@ async function saveConfiguration() {
   if (!operation) return false;
   try {
     const payload = serializeConfig();
+    const requestActionIds = state.actions.map((action) => action._uiId);
     const selectedIndex = Math.max(
       0,
       state.actions.findIndex((action) => action._uiId === state.selectedId),
@@ -2392,14 +3085,23 @@ async function saveConfiguration() {
     elements.feedback.classList.remove('is-error');
     const result = await window.mascotAPI.saveConfig(payload, selectedIndex);
     if (!result?.ok) throw new Error('保存に失敗しました。');
+    const savedConfig = result.config || payload;
+    setPersistedSnapshot(savedConfig, requestActionIds);
+    markMigrationsPersisted();
+    state.applyRetry = !result.applied;
 
     if (state.revision !== revisionAtStart) {
       markNewerChangesPending();
+      if (!result.applied) {
+        elements.saveState.textContent = '保存済み・反映を再試行';
+        elements.feedback.textContent = `設定ファイルは保存しましたが、マスコットへの反映を確認できませんでした：${result.applyError || '応答がありません。'}`;
+        elements.feedback.classList.add('is-error');
+      }
       showToast('保存中に新しい変更が加わりました。もう一度保存してください。');
       return false;
     }
 
-    applyNormalizedConfigToState(result.config || payload);
+    applyNormalizedConfigToState(savedConfig, requestActionIds);
     if (!result.applied) {
       const message = `設定ファイルは保存しましたが、マスコットへの反映を確認できませんでした：${result.applyError || '応答がありません。'}`;
       markApplyRetry(message);
@@ -2410,6 +3112,110 @@ async function saveConfiguration() {
     markSaved();
     const actionLabel = result.actionName ? `「${result.actionName}」を表示して` : '';
     showToast(`設定を保存し、${actionLabel}マスコットへの反映を確認しました。`);
+    return true;
+  } catch (error) {
+    console.error(error);
+    showError(readableError(error));
+    return false;
+  } finally {
+    endOperation(operation);
+  }
+}
+
+function selectedActionSavePayload(action, index) {
+  if (!state.persistedSnapshot) {
+    throw new Error('保存済み設定の基準を読み込めていません。設定を再読み込みしてから保存してください。');
+  }
+  const serializedAction = serializeAction(action, index);
+  const config = structuredClone(state.persistedSnapshot.config);
+  const actionIds = [...state.persistedSnapshot.actionIds];
+  const savedIndex = actionIds.indexOf(action._uiId);
+
+  if (savedIndex >= 0) {
+    config.actions[savedIndex] = serializedAction;
+    return { config, actionIds, actionIndex: savedIndex };
+  }
+
+  if (config.actions.length >= MAX_ACTIONS) {
+    throw new Error(`保存済みの動作がすでに${MAX_ACTIONS}件あります。先に下部の「保存して反映」で一覧の削除を確定してください。`);
+  }
+
+  const workingIndex = state.actions.findIndex((candidate) => candidate._uiId === action._uiId);
+  let insertionIndex = 0;
+  for (let cursor = workingIndex - 1; cursor >= 0; cursor -= 1) {
+    const neighborIndex = actionIds.indexOf(state.actions[cursor]._uiId);
+    if (neighborIndex >= 0) {
+      insertionIndex = neighborIndex + 1;
+      break;
+    }
+  }
+  config.actions.splice(insertionIndex, 0, serializedAction);
+  actionIds.splice(insertionIndex, 0, action._uiId);
+  return { config, actionIds, actionIndex: insertionIndex };
+}
+
+async function saveSelectedAction() {
+  if (!state.apiAvailable) {
+    disableUnavailableEditor();
+    return false;
+  }
+  const action = selectedAction();
+  if (!action) return false;
+  if (state.busy) return false;
+  if (!state.applyRetry && !isSelectedActionPending(action)) return false;
+
+  const operation = beginOperation('save-selected-action');
+  if (!operation) return false;
+  try {
+    const actionIndex = state.actions.findIndex((candidate) => candidate._uiId === action._uiId);
+    const { config: payload, actionIds, actionIndex: previewIndex } = selectedActionSavePayload(action, actionIndex);
+    const requestActionId = action._uiId;
+    const submittedActionName = payload.actions[previewIndex]?.name || action.name || '選択中の動作';
+    const revisionAtStart = state.revision;
+    elements.feedback.textContent = `「${submittedActionName}」を保存し、マスコットへの反映を確認しています…`;
+    elements.feedback.classList.remove('is-error');
+    const result = await window.mascotAPI.saveConfig(payload, previewIndex);
+    if (!result?.ok) throw new Error('選択中の動作を保存できませんでした。');
+
+    const savedConfig = result.config || payload;
+    setPersistedSnapshot(savedConfig, actionIds);
+    markMigrationsPersisted();
+    state.applyRetry = !result.applied;
+    const savedIndex = actionIds.indexOf(requestActionId);
+    const persistedActionName = savedConfig.actions?.[savedIndex]?.name
+      || payload.actions[savedIndex]?.name
+      || submittedActionName;
+    if (state.revision === revisionAtStart) {
+      const currentIndex = state.actions.findIndex((candidate) => candidate._uiId === requestActionId);
+      const savedAction = savedConfig.actions?.[savedIndex] || payload.actions[savedIndex];
+      if (currentIndex >= 0 && savedAction) {
+        const currentAction = state.actions[currentIndex];
+        state.actions[currentIndex] = editableActionFromConfig(savedAction, currentAction, requestActionId);
+      }
+    }
+
+    if (!result.applied) {
+      const message = `設定ファイルは保存しましたが、マスコットへの反映を確認できませんでした：${result.applyError || '応答がありません。'}`;
+      markApplyRetry(message);
+      renderActionList();
+      renderEditor();
+      showToast(`「${persistedActionName}」の反映を確認できませんでした。もう一度保存すると再試行できます。`, true);
+      return false;
+    }
+
+    refreshPendingStatus(
+      '未保存の変更',
+      hasPendingChanges()
+        ? '選択中の動作を保存して反映しました。他の設定や保存中の追加編集はまだ保存されていません。'
+        : '選択中の動作を保存し、マスコットへの反映を確認しました。',
+    );
+    renderActionList();
+    renderEditor();
+    if (state.dirty) {
+      showToast(`「${persistedActionName}」を保存して反映しました。他の設定や追加編集は未保存です。`);
+    } else {
+      showToast(`「${persistedActionName}」を保存し、マスコットへの反映を確認しました。`);
+    }
     return true;
   } catch (error) {
     console.error(error);
@@ -2450,22 +3256,12 @@ async function prepareDistributionDefaults() {
   }
 }
 
-elements.mascotName.addEventListener('input', () => {
-  if (!state.config) return;
-  state.config.name = elements.mascotName.value;
-  markDirty();
-});
 elements.mascotSize.addEventListener('input', () => {
   if (!state.config?.mascot) return;
   state.config.mascot.size = numberOr(elements.mascotSize.value, 180);
   elements.mascotSizeOutput.textContent = `${elements.mascotSize.value} px`;
   markDirty();
-  renderEffectLivePreview();
-});
-elements.startPosition.addEventListener('change', () => {
-  if (!state.config?.mascot) return;
-  state.config.mascot.startPosition = elements.startPosition.value;
-  markDirty();
+  refreshPreviewGeometry();
 });
 elements.rememberPosition.addEventListener('change', () => {
   if (!state.config?.mascot) return;
@@ -2512,10 +3308,12 @@ elements.movementType.addEventListener('change', () => {
   renderEditor();
 });
 elements.movementSpeed.addEventListener('input', () => {
+  const previewAction = selectedAction();
   editSelectedAction((action) => {
     action.movement.speed = readNumberInput(elements.movementSpeed.value);
   });
   elements.speedOutput.textContent = elements.movementSpeed.value;
+  startMovementSpeedPreview(previewAction);
 });
 
 elements.effectEnabled.addEventListener('change', () => {
@@ -2576,6 +3374,19 @@ elements.openSizeManager.addEventListener('click', openSizeManager);
 elements.openDurationBulk.addEventListener('click', openDurationBulkDialog);
 elements.durationBulkCancel.addEventListener('click', () => elements.durationBulkDialog.close());
 elements.durationBulkSave.addEventListener('click', () => applyDurationBulk());
+elements.durationBulkDurationEnabled.addEventListener('change', () => {
+  const enabled = elements.durationBulkDurationEnabled.checked;
+  elements.durationBulkMin.disabled = !enabled;
+  elements.durationBulkMax.disabled = !enabled;
+  updateDurationBulkCount();
+});
+elements.durationBulkSpeedEnabled.addEventListener('change', () => {
+  elements.durationBulkSpeed.disabled = !elements.durationBulkSpeedEnabled.checked;
+  updateDurationBulkCount();
+});
+elements.movementSpeedPreviewStop.addEventListener('click', () => {
+  stopMovementSpeedPreview('プレビューを停止しました。速さを変更すると再生できます。');
+});
 elements.imageEditButton.addEventListener('click', openImageEditor);
 setupDropzone(elements.actionDropzone, 'actions', applyImportedActionImage);
 setupDropzone(elements.effectDropzone, 'effects', applyImportedEffectImage);
@@ -2584,11 +3395,43 @@ elements.prepareReleaseButton.addEventListener('click', prepareDistributionDefau
 elements.recoveryBackup.addEventListener('click', () => recoverConfiguration('backup'));
 elements.recoveryDefaults.addEventListener('click', () => recoverConfiguration('defaults'));
 elements.reloadButton.addEventListener('click', () => loadConfiguration({ askBeforeDiscard: true }));
+elements.headerSaveButton.addEventListener('click', saveConfiguration);
 elements.saveButton.addEventListener('click', saveConfiguration);
+elements.saveSelectedAction.addEventListener('click', saveSelectedAction);
 
 window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
-window.addEventListener('resize', renderEffectLivePreview);
+window.addEventListener('pagehide', () => stopMovementSpeedPreview());
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) stopMovementSpeedPreview();
+});
+elements.actionActualSize.addEventListener('click', () => openActualSizePreview(() => ({ action: selectedAction() })));
+elements.effectActualSize.addEventListener('click', () => openActualSizePreview(() => ({
+  action: selectedAction(), effect: selectedAction()?.effect,
+})));
+elements.actualSizeClose.addEventListener('click', closeActualSizePreview);
+elements.actualSizeDialog.addEventListener('cancel', (event) => {
+  event.preventDefault();
+  closeActualSizePreview();
+});
+elements.actualSizeDialog.addEventListener('close', () => {
+  if (!elements.actualSizeDialog.open) actualSizeSource = null;
+});
+for (const image of [
+  elements.actionPreview, elements.imageEditorPreview, elements.effectLiveMascotImage,
+  elements.effectLiveImage, elements.actualSizeImage, elements.actualSizeEffect,
+]) {
+  image.addEventListener('load', refreshPreviewGeometry);
+  image.addEventListener('error', refreshPreviewGeometry);
+}
+window.addEventListener('resize', refreshPreviewGeometry);
+if (typeof ResizeObserver !== 'undefined') {
+  const previewResizeObserver = new ResizeObserver(refreshPreviewGeometry);
+  for (const container of [elements.actionDropzone, elements.imageControlStack, elements.imageEditorStage, elements.sizeManagerGrid, elements.effectLivePreview]) {
+    previewResizeObserver.observe(container);
+  }
+  window.addEventListener('beforeunload', () => previewResizeObserver.disconnect());
+}
 window.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();

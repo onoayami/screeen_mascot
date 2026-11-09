@@ -24,6 +24,7 @@ const {
   copyValidatedImageFile,
   isLexicallyInsideRoot,
   MAX_IMAGE_FILE_BYTES,
+  normalizeRelativeImagePath,
   resolveImageFileWithinRoot,
   sha256Buffer,
   sha256File,
@@ -32,6 +33,7 @@ const {
 const { createImageDecodeValidator } = require('./shared/image-decode');
 const {
   validateAndNormalizeConfig: validateConfigWithRules,
+  validateAndNormalizeLoadedConfig: validateLoadedConfigWithRules,
 } = require('./shared/config-rules');
 
 let mascotWindow = null;
@@ -43,6 +45,8 @@ let settingsDirty = false;
 let allowSettingsClose = false;
 let settingsClosePromptPending = false;
 let quitRequested = false;
+let quitAttemptCounter = 0;
+let activeQuitAttemptSequence = null;
 let pointerSyncTimer = null;
 let mascotWatchdogTimer = null;
 let mascotRecoveryTimer = null;
@@ -53,6 +57,18 @@ let recoveryMonitoringStarted = false;
 let rendererFailureCount = 0;
 let rendererReloadStopped = false;
 let rendererIsUnresponsive = false;
+let pendingRendererReadyNotification = null;
+let lastPointerSync = null;
+const POINTER_SYNC_HEARTBEAT_MS = 5000;
+const sessionImportedImagePaths = new Set();
+const droppedPathTokens = new Map();
+const DROPPED_PATH_TOKEN_TTL_MS = 60_000;
+const MAX_DROPPED_PATH_TOKENS = 50;
+const diagnosticBuffer = [];
+let diagnosticFlushTimer = null;
+let diagnosticWriteInProgress = false;
+let diagnosticWritePromise = Promise.resolve();
+let diagnosticQuitFlushPending = false;
 let lastRendererReloadAt = -Infinity;
 let rendererReloadReason = '';
 let preparedCharacterDirectory = null;
@@ -75,10 +91,39 @@ const RENDERER_DIAGNOSTIC_TYPES = new Set([
   'image-load-failed',
 ]);
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   quitRequested = true;
+  if (activeQuitAttemptSequence === null) beginQuitAttempt('native');
+  recordQuitDiagnostic('before-quit');
+  if (
+    settingsDirty
+    && !allowSettingsClose
+    && settingsWindow
+    && !settingsWindow.isDestroyed()
+  ) {
+    event.preventDefault();
+    confirmSettingsClose(settingsWindow);
+    return;
+  }
+  if (diagnosticWriteInProgress) {
+    event.preventDefault();
+    if (!diagnosticQuitFlushPending) {
+      diagnosticQuitFlushPending = true;
+      void flushDiagnostics().finally(() => {
+        flushDiagnosticsSync();
+        diagnosticQuitFlushPending = false;
+        if (quitRequested && activeQuitAttemptSequence !== null) app.quit();
+      });
+    }
+  } else flushDiagnosticsSync();
 });
-app.on('will-quit', () => recordDiagnostic('app-quit'));
+app.on('will-quit', () => {
+  recordQuitDiagnostic('will-quit');
+  recordQuitDiagnostic('app-quit');
+  flushDiagnosticsSync();
+  activeQuitAttemptSequence = null;
+  quitRequested = false;
+});
 
 const LEGACY_CAT_PAW_SHA256 = 'b09160f6eb8006787e487390c3b12a6711aa96c6120402d22b92bf53a7de0a92';
 const LEGACY_DEFAULT_ASSET_SHA256 = Object.freeze({
@@ -90,7 +135,7 @@ const LEGACY_DEFAULT_ASSET_SHA256 = Object.freeze({
 });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
-const validateImageDecodes = createImageDecodeValidator({ nativeImage });
+const validateImageDecodes = createImageDecodeValidator({ nativeImage, fsModule: fs });
 
 function getCharacterDirectory() {
   return path.join(app.getPath('userData'), 'characters');
@@ -117,31 +162,235 @@ function getDisplayDiagnostics() {
 }
 
 function recordDiagnostic(event, details = {}) {
-  const filePath = path.join(app.getPath('userData'), 'mascot-diagnostics.log');
   const line = `${JSON.stringify({
     timestamp: new Date().toISOString(),
     event,
     ...details,
   })}\n`;
+  diagnosticBuffer.push(line);
+  if (diagnosticBuffer.length >= 20) {
+    void flushDiagnostics();
+  } else if (!diagnosticFlushTimer) {
+    diagnosticFlushTimer = setTimeout(() => {
+      diagnosticFlushTimer = null;
+      startDiagnosticWrite();
+    }, 250);
+    diagnosticFlushTimer.unref?.();
+  }
+}
 
+function diagnosticLogPaths() {
+  const directory = app.getPath('userData');
+  return {
+    filePath: path.join(directory, 'mascot-diagnostics.log'),
+    oldFilePath: path.join(directory, 'mascot-diagnostics.old.log'),
+  };
+}
+
+function rotateDiagnosticLogSync(filePath, oldFilePath, appendedBytes) {
+  let currentSize = 0;
+  try {
+    currentSize = fs.statSync(filePath).size;
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  if (currentSize + appendedBytes <= DIAGNOSTIC_LOG_MAX_BYTES) return;
+  if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
+  if (currentSize > 0) fs.renameSync(filePath, oldFilePath);
+}
+
+function writeDiagnosticBatchSync(lines) {
+  if (lines.length === 0) return true;
+  const { filePath, oldFilePath } = diagnosticLogPaths();
+  const content = lines.join('');
+  try {
+    rotateDiagnosticLogSync(filePath, oldFilePath, Buffer.byteLength(content, 'utf8'));
+    fs.appendFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+    return true;
+  } catch (error) {
+    console.warn('診断ログを書き込めませんでした。', String(error?.message || error));
+    return false;
+  }
+}
+
+async function writeDiagnosticBatch(lines) {
+  if (lines.length === 0) return;
+  const { filePath, oldFilePath } = diagnosticLogPaths();
+  const content = lines.join('');
+  let handle = null;
+  let originalSize = 0;
+  let originalSizeKnown = false;
   try {
     let currentSize = 0;
     try {
-      currentSize = fs.statSync(filePath).size;
+      currentSize = (await fs.promises.stat(filePath)).size;
     } catch (error) {
       if (error.code !== 'ENOENT') throw error;
     }
-
-    if (currentSize + Buffer.byteLength(line, 'utf8') > DIAGNOSTIC_LOG_MAX_BYTES) {
-      const oldFilePath = path.join(app.getPath('userData'), 'mascot-diagnostics.old.log');
-      if (fs.existsSync(oldFilePath)) fs.unlinkSync(oldFilePath);
-      if (currentSize > 0) fs.renameSync(filePath, oldFilePath);
+    if (currentSize + Buffer.byteLength(content, 'utf8') > DIAGNOSTIC_LOG_MAX_BYTES) {
+      try {
+        await fs.promises.unlink(oldFilePath);
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error;
+      }
+      if (currentSize > 0) await fs.promises.rename(filePath, oldFilePath);
     }
-
-    fs.appendFileSync(filePath, line, { encoding: 'utf8', mode: 0o600 });
+    handle = await fs.promises.open(filePath, 'a+', 0o600);
+    originalSize = (await handle.stat()).size;
+    originalSizeKnown = true;
+    const bytes = Buffer.from(content, 'utf8');
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, originalSize + offset);
+      if (bytesWritten <= 0) throw new Error('診断ログを書き込めませんでした。');
+      offset += bytesWritten;
+    }
+    return true;
   } catch (error) {
+    if (handle && originalSizeKnown) {
+      try {
+        await handle.truncate(originalSize);
+      } catch (_truncateError) {
+        console.warn('診断ログの不完全な書き込みを整理できませんでした。');
+      }
+    }
     console.warn('診断ログを書き込めませんでした。', String(error?.message || error));
+    return false;
+  } finally {
+    await handle?.close().catch((error) => {
+      console.warn('診断ログを閉じられませんでした。', String(error?.message || error));
+    });
   }
+}
+
+function startDiagnosticWrite() {
+  if (diagnosticWriteInProgress || diagnosticBuffer.length === 0) return diagnosticWritePromise;
+  const lines = diagnosticBuffer.splice(0, diagnosticBuffer.length);
+  diagnosticWriteInProgress = true;
+  let succeeded = false;
+  diagnosticWritePromise = writeDiagnosticBatch(lines).then((result) => {
+    succeeded = result;
+    if (!result) diagnosticBuffer.unshift(...lines);
+    return result;
+  }).finally(() => {
+    diagnosticWriteInProgress = false;
+    if (succeeded && diagnosticBuffer.length > 0 && !diagnosticFlushTimer) {
+      diagnosticFlushTimer = setTimeout(() => {
+        diagnosticFlushTimer = null;
+        startDiagnosticWrite();
+      }, 250);
+      diagnosticFlushTimer.unref?.();
+    }
+  });
+  return diagnosticWritePromise;
+}
+
+async function flushDiagnostics() {
+  if (diagnosticFlushTimer) {
+    clearTimeout(diagnosticFlushTimer);
+    diagnosticFlushTimer = null;
+  }
+  while (diagnosticBuffer.length > 0 || diagnosticWriteInProgress) {
+    if (diagnosticWriteInProgress) await diagnosticWritePromise;
+    else if (!await startDiagnosticWrite()) return false;
+  }
+  return true;
+}
+
+function flushDiagnosticsSync() {
+  if (diagnosticWriteInProgress) return false;
+  if (diagnosticFlushTimer) {
+    clearTimeout(diagnosticFlushTimer);
+    diagnosticFlushTimer = null;
+  }
+  const lines = diagnosticBuffer.splice(0, diagnosticBuffer.length);
+  if (writeDiagnosticBatchSync(lines)) return true;
+  diagnosticBuffer.unshift(...lines);
+  return false;
+}
+
+function recordQuitDiagnostic(event, details = {}) {
+  recordDiagnostic(event, {
+    processId: process.pid,
+    quitAttemptSequence: activeQuitAttemptSequence,
+    ...details,
+  });
+  flushDiagnosticsSync();
+}
+
+function beginQuitAttempt(source) {
+  if (activeQuitAttemptSequence === null) {
+    quitAttemptCounter += 1;
+    activeQuitAttemptSequence = quitAttemptCounter;
+  }
+  recordQuitDiagnostic('quit-requested', { source });
+  return activeQuitAttemptSequence;
+}
+
+function requestAppQuit(source) {
+  beginQuitAttempt(source);
+  app.quit();
+}
+
+function clearQuitAttempt() {
+  activeQuitAttemptSequence = null;
+  quitRequested = false;
+}
+
+function confirmSettingsClose(promptWindow) {
+  if (settingsClosePromptPending || !promptWindow || promptWindow.isDestroyed()) return;
+  if (quitRequested) {
+    if (promptWindow.isMinimized?.()) promptWindow.restore();
+    if (!promptWindow.isVisible()) promptWindow.show();
+    promptWindow.focus();
+  }
+  settingsClosePromptPending = true;
+  recordQuitDiagnostic('quit-confirmation-pending');
+  Promise.resolve().then(() => dialog.showMessageBox(promptWindow, {
+    type: 'warning',
+    title: '未保存の変更があります',
+    message: '設定を保存せずに閉じますか？',
+    detail: '「編集に戻る」を選ぶと、この画面を開いたままにします。',
+    buttons: ['編集に戻る', '保存せず閉じる'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  })).then(({ response }) => {
+    if (settingsWindow !== promptWindow || promptWindow.isDestroyed()) {
+      const clearAttempt = settingsWindow === null || settingsWindow === promptWindow;
+      recordQuitDiagnostic('quit-confirmation-window-unavailable', {
+        quitAttemptSequence: clearAttempt ? activeQuitAttemptSequence : null,
+        decision: response === 1 ? 'discard' : 'edit',
+      });
+      if (clearAttempt) clearQuitAttempt();
+      return;
+    }
+    settingsClosePromptPending = false;
+    if (response !== 1) {
+      recordQuitDiagnostic('quit-confirmation-cancelled', { decision: 'edit' });
+      clearQuitAttempt();
+      return;
+    }
+    recordQuitDiagnostic('quit-confirmation-discarded', { decision: 'discard' });
+    allowSettingsClose = true;
+    settingsDirty = false;
+    promptWindow.close();
+    if (quitRequested) requestAppQuit('discard-confirmed');
+  }).catch((error) => {
+    if (settingsWindow === promptWindow) {
+      settingsClosePromptPending = false;
+      recordQuitDiagnostic('quit-confirmation-error');
+      clearQuitAttempt();
+    } else if (settingsWindow === null) {
+      recordQuitDiagnostic('quit-confirmation-error');
+      clearQuitAttempt();
+    } else {
+      recordQuitDiagnostic('quit-confirmation-error', {
+        quitAttemptSequence: null,
+      });
+    }
+    dialog.showErrorBox('設定画面を閉じられませんでした', String(error?.message || error));
+  });
 }
 
 function mascotWindowSnapshot() {
@@ -161,8 +410,9 @@ function getBundledCharacterDirectory() {
 }
 
 function getCharacterAssetMetadata(relativePath) {
-  const assetPath = resolveCharacterPath(relativePath);
-  if (!assetPath) throw new Error(`参照画像が見つかりません：${relativePath}`);
+  const assetPath = resolveImageFileWithinRoot(getCharacterDirectory(), relativePath, {
+    fsModule: fs,
+  });
   const stat = fs.statSync(assetPath);
   return {
     size: stat.size,
@@ -297,6 +547,9 @@ function resolveCharacterAsset(relativePath) {
 const validateAndNormalizeConfig = (input) => validateConfigWithRules(input, {
   validateAsset: requireCharacterPath,
 });
+const validateAndNormalizeLoadedConfig = (input) => validateLoadedConfigWithRules(input, {
+  validateAsset: requireCharacterPath,
+});
 
 function stableValue(value) {
   if (Array.isArray(value)) return value.map(stableValue);
@@ -368,15 +621,39 @@ function collectConfigAssetReferences(config) {
   return [...new Set(references)];
 }
 
+function discardImportedImage(relativePath, category) {
+  if (!['actions', 'effects'].includes(category)) throw new Error('画像カテゴリが正しくありません。');
+  const normalized = normalizeRelativeImagePath(relativePath);
+  if (!/\.jpe?g$/i.test(normalized)) return false;
+  if (!normalized.startsWith(`${category}/`)) throw new Error('画像の保存先が正しくありません。');
+  const characterRoot = getCharacterDirectory();
+  const imagePath = resolveImageFileWithinRoot(characterRoot, normalized, { fsModule: fs });
+  if (!isLexicallyInsideRoot(path.join(characterRoot, category), imagePath)) {
+    throw new Error('画像の保存先が正しくありません。');
+  }
+  const absolutePath = path.resolve(imagePath);
+  if (!sessionImportedImagePaths.has(absolutePath)) return false;
+  const editable = loadEditableConfig();
+  if (!editable?.config) return false;
+  if (collectConfigAssetReferences(editable.config).includes(normalized)) return false;
+  fs.unlinkSync(absolutePath);
+  sessionImportedImagePaths.delete(absolutePath);
+  return true;
+}
+
 function writeConfigAtomic(config, { backupCurrent = true } = {}) {
   const directory = ensureCharacterDirectory();
   const destination = path.join(directory, 'config.json');
   if (backupCurrent && fs.existsSync(destination)) {
     try {
-      const current = validateConfigWithRules(JSON.parse(fs.readFileSync(destination, 'utf8')));
+      const current = JSON.parse(fs.readFileSync(destination, 'utf8'));
+      validateLoadedConfigWithRules(current);
       writeConfigBackup(current, directory);
-    } catch (_error) {
+    } catch (error) {
       // Keep the last known-good backup when the current file is broken.
+      recordDiagnostic('config-backup-skipped', {
+        reason: String(error?.message || error),
+      });
     }
   }
   writeJsonAtomic(destination, config);
@@ -387,15 +664,39 @@ function loadNormalizedConfig({ persistMigration = true } = {}) {
   const characterDirectory = ensureCharacterDirectory();
   const configPath = path.join(characterDirectory, 'config.json');
   const rawConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-  const config = validateAndNormalizeConfig(rawConfig);
+  const { config, warnings } = validateAndNormalizeLoadedConfig(rawConfig);
+  const configHash = hashNormalizedConfig(config);
+  const hasLegacyMovementSpeeds = warnings.length > 0;
 
-  if (persistMigration && hashNormalizedConfig(rawConfig) !== hashNormalizedConfig(config)) {
+  if (
+    !hasLegacyMovementSpeeds
+    && persistMigration
+    && hashNormalizedConfig(rawConfig) !== configHash
+  ) {
     writeConfigAtomic(config);
-  } else if (!fs.existsSync(configBackupPath(characterDirectory))) {
+  } else if (!hasLegacyMovementSpeeds && !fs.existsSync(configBackupPath(characterDirectory))) {
     writeConfigBackup(config, characterDirectory);
   }
 
-  return { config, characterDirectory, configHash: hashNormalizedConfig(config) };
+  return { config, characterDirectory, configHash, warnings };
+}
+
+function loadMascotRuntimeConfig() {
+  try {
+    return loadNormalizedConfig();
+  } catch (error) {
+    if (!error?.assetUnavailable && !error?.assetContentInvalid) throw error;
+    const characterDirectory = getCharacterDirectory();
+    const rawConfig = JSON.parse(fs.readFileSync(path.join(characterDirectory, 'config.json'), 'utf8'));
+    const { config, warnings } = validateLoadedConfigWithRules(rawConfig);
+    return {
+      config,
+      characterDirectory,
+      configHash: hashNormalizedConfig(config),
+      warnings,
+      assetsIncomplete: true,
+    };
+  }
 }
 
 function editableRecovery(kind, error, characterDirectory) {
@@ -424,8 +725,11 @@ function loadEditableConfig() {
   }
 
   let config;
+  let compatibilityWarnings = [];
   try {
-    config = validateConfigWithRules(rawConfig);
+    const loaded = validateLoadedConfigWithRules(rawConfig);
+    config = loaded.config;
+    compatibilityWarnings = loaded.warnings;
   } catch (error) {
     return {
       config: null,
@@ -438,12 +742,16 @@ function loadEditableConfig() {
 
   const missingAssets = collectConfigAssetReferences(config)
     .filter((relativePath) => !resolveCharacterPath(relativePath));
-  const warnings = missingAssets.map((relativePath) => `画像が見つかりません：${relativePath}`);
+  const warnings = [
+    ...(compatibilityWarnings || []),
+    ...missingAssets.map((relativePath) => `画像が見つかりません：${relativePath}`),
+  ];
   return {
     config,
     characterDirectory,
     configHash: hashNormalizedConfig(config),
     warnings,
+    pendingMigrations: compatibilityWarnings.length > 0 ? ['legacy-movement-speed'] : [],
     missingAssets,
     recovery: {
       kind: missingAssets.length > 0 ? 'missing-assets' : 'none',
@@ -455,10 +763,10 @@ function loadEditableConfig() {
 
 function pruneRecoveryFiles(directory, keep = 5) {
   const files = fs.readdirSync(directory)
-    .filter((name) => /^config\.recovery-\d+\.json$/.test(name))
+    .filter((name) => /^config\.recovery-\d+(?:-[0-9a-f]{8})?\.json$/i.test(name))
     .sort((left, right) => {
-      const leftTimestamp = Number(left.match(/^config\.recovery-(\d+)\.json$/)[1]);
-      const rightTimestamp = Number(right.match(/^config\.recovery-(\d+)\.json$/)[1]);
+      const leftTimestamp = Number(left.match(/^config\.recovery-(\d+)/)[1]);
+      const rightTimestamp = Number(right.match(/^config\.recovery-(\d+)/)[1]);
       return leftTimestamp - rightTimestamp;
     });
   for (const name of files.slice(0, Math.max(0, files.length - keep))) {
@@ -469,8 +777,11 @@ function pruneRecoveryFiles(directory, keep = 5) {
 function preserveCurrentConfig(characterDirectory) {
   const source = path.join(characterDirectory, 'config.json');
   if (!fs.existsSync(source)) return null;
-  const destination = path.join(characterDirectory, `config.recovery-${Date.now()}.json`);
-  fs.copyFileSync(source, destination);
+  const destination = path.join(
+    characterDirectory,
+    `config.recovery-${Date.now()}-${crypto.randomUUID().slice(0, 8)}.json`,
+  );
+  fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
   pruneRecoveryFiles(characterDirectory);
   return destination;
 }
@@ -502,10 +813,13 @@ function restoreBundledAsset(relativePath, characterDirectory) {
 function recoverEditableConfig(strategy) {
   const characterDirectory = ensureCharacterDirectory();
   let config;
+  let compatibilityWarnings = [];
   if (strategy === 'backup') {
     const backup = configBackupPath(characterDirectory);
     if (!fs.existsSync(backup)) throw new Error('復元できるバックアップがありません。');
-    config = validateAndNormalizeConfig(JSON.parse(fs.readFileSync(backup, 'utf8')));
+    const loaded = validateAndNormalizeLoadedConfig(JSON.parse(fs.readFileSync(backup, 'utf8')));
+    config = loaded.config;
+    compatibilityWarnings = loaded.warnings;
   } else if (strategy === 'defaults') {
     const bundledPath = path.join(getBundledCharacterDirectory(), 'config.json');
     config = validateConfigWithRules(JSON.parse(fs.readFileSync(bundledPath, 'utf8')));
@@ -520,7 +834,13 @@ function recoverEditableConfig(strategy) {
   const recoveryPath = preserveCurrentConfig(characterDirectory);
   writeConfigAtomic(config, { backupCurrent: false });
   writeConfigBackup(config, characterDirectory);
-  return { ok: true, recoveryPath, ...loadEditableConfig() };
+  const editable = loadEditableConfig();
+  return {
+    ok: true,
+    recoveryPath,
+    ...editable,
+    warnings: [...compatibilityWarnings, ...editable.warnings],
+  };
 }
 
 function uniqueDestination(directory, fileName) {
@@ -534,6 +854,67 @@ function uniqueDestination(directory, fileName) {
   }
 
   return candidate;
+}
+
+function publishImageTemporary(temporary, directory, fileName) {
+  const parsed = path.parse(fileName);
+  let counter = 1;
+  while (true) {
+    const candidateName = counter === 1
+      ? fileName
+      : `${parsed.name}-${counter}${parsed.ext}`;
+    const candidate = path.join(directory, candidateName);
+    try {
+      fs.linkSync(temporary, candidate);
+    } catch (error) {
+      if (error.code === 'EEXIST') {
+        counter += 1;
+        continue;
+      }
+      if (!['EPERM', 'EXDEV', 'ENOTSUP', 'EOPNOTSUPP'].includes(error.code)) throw error;
+      try {
+        fs.copyFileSync(temporary, candidate, fs.constants.COPYFILE_EXCL);
+      } catch (copyError) {
+        if (copyError.code === 'EEXIST') {
+          counter += 1;
+          continue;
+        }
+        throw copyError;
+      }
+    }
+    try {
+      fs.unlinkSync(temporary);
+    } catch (error) {
+      console.warn('画像の一時ファイルを削除できませんでした。', String(error?.message || error));
+    }
+    return candidate;
+  }
+}
+
+function registerDroppedPath(filePath) {
+  if (typeof filePath !== 'string' || filePath.trim() === '') return null;
+  const now = Date.now();
+  for (const [token, entry] of droppedPathTokens) {
+    if (entry.expiresAt <= now) droppedPathTokens.delete(token);
+  }
+  while (droppedPathTokens.size >= MAX_DROPPED_PATH_TOKENS) {
+    droppedPathTokens.delete(droppedPathTokens.keys().next().value);
+  }
+  const token = `drop:${crypto.randomUUID()}`;
+  droppedPathTokens.set(token, {
+    filePath: path.resolve(filePath),
+    expiresAt: now + DROPPED_PATH_TOKEN_TTL_MS,
+  });
+  return token;
+}
+
+function consumeDroppedPath(token) {
+  const entry = droppedPathTokens.get(token);
+  droppedPathTokens.delete(token);
+  if (!entry || entry.expiresAt <= Date.now()) {
+    throw new Error('画像の取り込み許可が無効または期限切れです。もう一度ドロップしてください。');
+  }
+  return entry.filePath;
 }
 
 function ensureAssetCategoryDirectory(category) {
@@ -574,6 +955,7 @@ function importImageFromPath(sourcePath, category) {
   const destinationRoot = path.resolve(destinationDirectory);
 
   let destination;
+  let importedCopy = false;
   if (isLexicallyInsideRoot(destinationRoot, sourceResolved)) {
     const sourceRelativePath = path.relative(characterRoot, sourceResolved).split(path.sep).join('/');
     destination = resolveImageFileWithinRoot(characterRoot, sourceRelativePath, {
@@ -590,13 +972,15 @@ function importImageFromPath(sourcePath, category) {
         fsModule: fs,
         validateAsset: validateImageDecodes,
       });
-      fs.renameSync(temporary, destination);
+      destination = publishImageTemporary(temporary, destinationDirectory, safeBaseName);
+      importedCopy = true;
     } catch (error) {
       fs.rmSync(temporary, { force: true });
       throw error;
     }
   }
 
+  if (importedCopy) sessionImportedImagePaths.add(path.resolve(destination));
   const relativePath = path.relative(characterRoot, destination).split(path.sep).join('/');
   const isJpeg = extension === '.jpg' || extension === '.jpeg';
   return {
@@ -639,18 +1023,21 @@ function saveTransparentPng(arrayBuffer, category, originalName) {
     if (sha256Buffer(pngBuffer) !== sha256File(temporary, fs)) {
       throw new Error('変換後のPNGハッシュが一致しません。');
     }
-    fs.renameSync(temporary, destination);
+    const published = publishImageTemporary(
+      temporary,
+      destinationDirectory,
+      path.basename(destination),
+    );
+    const relativePath = path.relative(characterRoot, published).split(path.sep).join('/');
+    return {
+      relativePath,
+      assetUrl: pathToFileURL(published).href,
+      isJpeg: false,
+    };
   } catch (error) {
     fs.rmSync(temporary, { force: true });
     throw error;
   }
-
-  const relativePath = path.relative(characterRoot, destination).split(path.sep).join('/');
-  return {
-    relativePath,
-    assetUrl: pathToFileURL(destination).href,
-    isJpeg: false,
-  };
 }
 
 function sendMascotCommand(command, value) {
@@ -689,6 +1076,15 @@ function selectDisplayForMascot(windowBounds, { preferCursor = false } = {}) {
   return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
 }
 
+function clearPendingRendererReadyNotification() {
+  if (!pendingRendererReadyNotification) return;
+  pendingRendererReadyNotification.webContents.removeListener(
+    'did-finish-load',
+    pendingRendererReadyNotification.listener,
+  );
+  pendingRendererReadyNotification = null;
+}
+
 function ensureMascotWindowOnScreen({ preferCursor = false, centerMascot = false } = {}) {
   if (!mascotWindow || mascotWindow.isDestroyed()) return false;
   const display = selectDisplayForMascot(mascotWindow.getBounds(), { preferCursor });
@@ -707,10 +1103,26 @@ function ensureMascotWindowOnScreen({ preferCursor = false, centerMascot = false
     if (mascotWindow && !mascotWindow.isDestroyed()) sendMascotCommand(command);
   };
   if (mascotWindow.webContents.isLoading()) {
-    mascotWindow.webContents.once('did-finish-load', notifyRenderer);
+    const webContents = mascotWindow.webContents;
+    if (pendingRendererReadyNotification?.webContents !== webContents) {
+      clearPendingRendererReadyNotification();
+      const pending = { webContents, command, listener: null };
+      pending.listener = () => {
+        if (pendingRendererReadyNotification !== pending) return;
+        pendingRendererReadyNotification = null;
+        if (!mascotWindow || mascotWindow.isDestroyed()) return;
+        sendMascotCommand(pending.command);
+      };
+      pendingRendererReadyNotification = pending;
+      webContents.once('did-finish-load', pending.listener);
+    } else {
+      pendingRendererReadyNotification.command = command;
+    }
   } else if (needsMove) {
+    clearPendingRendererReadyNotification();
     setTimeout(notifyRenderer, 60);
   } else {
+    clearPendingRendererReadyNotification();
     notifyRenderer();
   }
   return needsMove;
@@ -862,6 +1274,7 @@ function scheduleEnvironmentRecovery(reason) {
   clearTimeout(mascotRecoveryTimer);
   mascotRecoveryTimer = setTimeout(() => {
     mascotRecoveryTimer = null;
+    lastPointerSync = null;
     runMascotWatchdog(reason);
   }, RECOVERY_TIMING.recoveryDelayMs);
   mascotRecoveryTimer.unref?.();
@@ -889,10 +1302,16 @@ function synchronizeMascotPassthrough() {
   try {
     const cursor = screen.getCursorScreenPoint();
     const bounds = mascotWindow.getBounds();
-    sendMascotCommand('sync-pointer-position', {
-      x: cursor.x - bounds.x,
-      y: cursor.y - bounds.y,
-    });
+    const position = { x: cursor.x - bounds.x, y: cursor.y - bounds.y };
+    const now = Date.now();
+    if (
+      lastPointerSync
+      && lastPointerSync.x === position.x
+      && lastPointerSync.y === position.y
+      && now - lastPointerSync.sentAt < POINTER_SYNC_HEARTBEAT_MS
+    ) return true;
+    sendMascotCommand('sync-pointer-position', position);
+    lastPointerSync = { ...position, sentAt: now };
     return true;
   } catch (_error) {
     return false;
@@ -1117,34 +1536,17 @@ function openSettingsWindow() {
   configureWindowSecurity(settingsWindow, 'settings.html');
   loadWindowFileWithRecovery(settingsWindow, 'settings.html', '設定画面');
   settingsWindow.on('close', (event) => {
-    if (!settingsDirty || allowSettingsClose) return;
-    event.preventDefault();
-    if (settingsClosePromptPending) return;
-    settingsClosePromptPending = true;
-    dialog.showMessageBox(settingsWindow, {
-      type: 'warning',
-      title: '未保存の変更があります',
-      message: '設定を保存せずに閉じますか？',
-      detail: '「編集に戻る」を選ぶと、この画面を開いたままにします。',
-      buttons: ['編集に戻る', '保存せず閉じる'],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    }).then(({ response }) => {
-      settingsClosePromptPending = false;
-      if (response !== 1) {
-        quitRequested = false;
-        return;
-      }
-      if (!settingsWindow || settingsWindow.isDestroyed()) return;
-      allowSettingsClose = true;
-      settingsDirty = false;
-      settingsWindow.close();
-      if (quitRequested) app.quit();
-    }).catch((error) => {
-      settingsClosePromptPending = false;
-      dialog.showErrorBox('設定画面を閉じられませんでした', String(error?.message || error));
+    const shouldPreventClose = settingsDirty && !allowSettingsClose;
+    if (shouldPreventClose) event.preventDefault();
+    recordQuitDiagnostic('settings-close', {
+      decision: shouldPreventClose ? 'veto' : 'allow',
+      dirty: settingsDirty,
+      allowClose: allowSettingsClose,
+      promptPending: settingsClosePromptPending,
+      quitRequested,
     });
+    if (!shouldPreventClose || settingsClosePromptPending) return;
+    confirmSettingsClose(currentSettingsWindow);
   });
   const restoreFloatingWhenUnavailable = (reason) => {
     if (
@@ -1166,6 +1568,9 @@ function openSettingsWindow() {
   settingsWindow.on('hide', () => restoreFloatingWhenUnavailable('hidden'));
   settingsWindow.webContents.on('destroyed', () => restoreFloatingWhenUnavailable('destroyed'));
   settingsWindow.on('closed', () => {
+    recordQuitDiagnostic('settings-window-closed', {
+      currentWindow: settingsWindow === currentSettingsWindow,
+    });
     if (settingsWindow === currentSettingsWindow) {
       settingsWindow = null;
       settingsDirty = false;
@@ -1204,13 +1609,14 @@ function rebuildTrayMenu() {
       },
       { label: '設定を再読み込み', click: () => sendMascotCommand('reload-config') },
       { type: 'separator' },
-      { label: '終了', role: 'quit' },
+      { label: '終了', click: () => requestAppQuit('tray') },
     ]),
   );
 }
 
 function createMascotWindow() {
   mascotHiddenByUser = false;
+  lastPointerSync = null;
   const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
   const { x, y, width, height } = display.workArea;
 
@@ -1244,6 +1650,7 @@ function createMascotWindow() {
   }
   loadWindowFileWithRecovery(mascotWindow, 'index.html', 'マスコット画面');
   mascotWindow.webContents.on('did-finish-load', () => {
+    lastPointerSync = null;
     clearTimeout(unresponsiveTimer);
     clearTimeout(rendererReloadTimer);
     unresponsiveTimer = null;
@@ -1257,11 +1664,19 @@ function createMascotWindow() {
     recordDiagnostic('renderer-ready');
   });
   mascotWindow.on('show', () => {
+    lastPointerSync = null;
     rebuildTrayMenu();
     synchronizeMascotPassthrough();
   });
+  mascotWindow.on('move', () => { lastPointerSync = null; });
   mascotWindow.on('hide', rebuildTrayMenu);
+  mascotWindow.on('close', () => {
+    recordQuitDiagnostic('mascot-close', { quitRequested });
+  });
   mascotWindow.on('closed', () => {
+    clearPendingRendererReadyNotification();
+    lastPointerSync = null;
+    recordQuitDiagnostic('mascot-closed', { quitRequested });
     clearTimeout(unresponsiveTimer);
     clearTimeout(rendererReloadTimer);
     unresponsiveTimer = null;
@@ -1296,8 +1711,9 @@ function createMascotWindow() {
     unresponsiveTimer = null;
     handleMascotRendererFailure('render-process-gone');
   });
-  mascotWindow.webContents.on('did-fail-load', (_event, _errorCode, _description, _url, isMainFrame) => {
-    if (isMainFrame === false) return;
+  mascotWindow.webContents.on('did-fail-load', (_event, errorCode, _description, _url, isMainFrame) => {
+    if (isMainFrame === false || errorCode === -3) return;
+    recordDiagnostic('did-fail-load', { errorCode });
     handleMascotRendererFailure('did-fail-load');
   });
 }
@@ -1360,7 +1776,7 @@ ipcMain.on('mascot:diagnostic', (event, diagnosticType) => {
   recordDiagnostic('renderer-error', { kind: diagnosticType });
 });
 
-registerIpcHandler('mascot:load-config', 'application', () => loadNormalizedConfig());
+registerIpcHandler('mascot:load-config', 'application', () => loadMascotRuntimeConfig());
 registerIpcHandler('mascot:load-editable-config', 'settings', () => loadEditableConfig());
 registerIpcHandler('mascot:recover-config', 'settings', (_event, strategy) => {
   return recoverEditableConfig(strategy);
@@ -1386,8 +1802,16 @@ registerIpcHandler('mascot:choose-image', 'settings', async (_event, category) =
   return importImageFromPath(result.filePaths[0], category);
 });
 
+registerIpcHandler('mascot:register-dropped-path', 'settings', (_event, filePath) => {
+  return registerDroppedPath(filePath);
+});
+
 registerIpcHandler('mascot:import-image', 'settings', (_event, { sourcePath, category }) => {
-  return importImageFromPath(sourcePath, category);
+  return importImageFromPath(consumeDroppedPath(sourcePath), category);
+});
+
+registerIpcHandler('mascot:discard-imported-image', 'settings', (_event, relativePath, category) => {
+  return discardImportedImage(relativePath, category);
 });
 
 registerIpcHandler('mascot:save-transparent-png', 'settings', (_event, payload) => {
@@ -1456,7 +1880,7 @@ registerIpcHandler('mascot:save-config', 'settings', async (_event, payload) => 
 function startApplication() {
   if (process.platform !== 'darwin') {
     dialog.showErrorBox('対応していないOSです', 'Desktop Mascot は現在 macOS 専用です。');
-    app.quit();
+    requestAppQuit('unsupported-platform');
     return;
   }
 
@@ -1480,7 +1904,7 @@ function reportStartupFailure(error) {
     'マスコットを起動できませんでした',
     `画像・設定の準備に失敗しました。既存データは自動削除していません。\n${String(error?.message || error)}\n\n画像・設定フォルダ：${getCharacterDirectory()}`,
   );
-  app.quit();
+  requestAppQuit('startup-failure');
 }
 
 if (hasSingleInstanceLock) {
@@ -1496,8 +1920,8 @@ if (hasSingleInstanceLock) {
     }
   });
   app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin') app.quit();
+    if (process.platform !== 'darwin') requestAppQuit('last-window-closed');
   });
 } else {
-  app.quit();
+  requestAppQuit('single-instance-lock-denied');
 }

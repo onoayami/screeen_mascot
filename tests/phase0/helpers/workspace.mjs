@@ -43,6 +43,7 @@ const APPROVED_TEST_SCRIPTS = Object.freeze({
   'test:release-c': 'node --test tests/release-c/*.test.mjs',
   'test:release-d': 'node --test tests/release-d/*.test.mjs',
   'test:automated': 'npm run check && npm run test:phase0:harness && npm run test:phase0:known-defects && npm run test:release-a1 && npm run test:release-a2 && npm run test:release-a3 && npm run test:release-b && npm run test:release-c && npm run test:release-d',
+  'test:automated:local': 'node scripts/run-automated-tests.mjs',
 });
 const APPROVED_CHECK_SCRIPT = 'node scripts/check-config.js && node scripts/check-release-text.js';
 const APPROVED_BUILD_SCRIPTS = Object.freeze({
@@ -248,6 +249,12 @@ export async function withTemporaryProject(callback) {
   try {
     return await callback({ temporaryRoot, projectRoot, userDataRoot, userCharacters });
   } finally {
+    const diagnosticFlushRegistry = globalThis.__phase0DiagnosticFlushRegistry;
+    const diagnosticFlushers = diagnosticFlushRegistry?.get(projectRoot);
+    if (diagnosticFlushers) {
+      for (const flushDiagnostics of diagnosticFlushers) await flushDiagnostics();
+      diagnosticFlushRegistry.delete(projectRoot);
+    }
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
     assert.deepEqual(currentProjectManifest(), sourceBefore, 'temporary test changed the source tree');
     assertBaselineCheckpointIntact();

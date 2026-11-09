@@ -358,11 +358,11 @@ test('B-09: settings serialization rejects out-of-range and reversed values with
       durationMs: [5000, 9000],
       flipMode: 'direction',
       imageTransform: { scale: 1, offsetX: 0, offsetY: 0 },
-      movement: { type: 'horizontal', speed: 2001 },
+      movement: { type: 'horizontal', speed: 301 },
     }];
     settings.api.state.selectedId = 'action-1';
 
-    assert.throws(() => settings.api.serializeConfig(), /0.*2000|速さ|speed/);
+    assert.throws(() => settings.api.serializeConfig(), /0.*300|速さ|speed/);
     settings.api.state.actions[0].movement.speed = 55;
     settings.api.state.actions[0].durationMs = [9000, 5000];
     assert.throws(() => settings.api.serializeConfig(), /最短|最長|duration/);
@@ -406,7 +406,7 @@ test('B-11: settings HTML uses the shared mascot size and movement speed ranges'
     assert.match(mascotSize, /min="32"/);
     assert.match(mascotSize, /max="1000"/);
     assert.match(movementSpeed, /min="0"/);
-    assert.match(movementSpeed, /max="2000"/);
+    assert.match(movementSpeed, /max="300"/);
   });
 });
 
