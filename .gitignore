@@ -5,3 +5,19 @@ npm-debug.log*
 *.log
 characters/default.backup/
 characters/default.staging-*/
+
+# Local secrets and signing credentials
+.env
+.env.*
+!.env.example
+*.p12
+*.pem
+*.key
+*.mobileprovision
+
+# Generated release packages
+*.dmg
+*.zip
+*.blockmap
+*.tgz
+coverage/
