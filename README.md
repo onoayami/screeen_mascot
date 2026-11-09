@@ -16,7 +16,7 @@
 
 [Desktop Mascot v2.3.4 のダウンロード（GitHub Releases）](https://github.com/onoayami/screeen_mascot/releases/tag/v2.3.4)
 
-Assetsから **`Desktop Mascot-2.3.4-universal.dmg`** をダウンロードします。`universal`版にはIntel Mac用とApple Silicon用の両方の実行形式が含まれています。対応OSの設定はmacOS 13以降です。これは対応形式と最小OSバージョンを示すもので、各Macでの動作認証を意味しません。
+Assetsから **`Desktop.Mascot-2.3.4-universal.dmg`** をダウンロードします。`universal`版にはIntel Mac用とApple Silicon用の両方の実行形式が含まれています。対応OSの設定はmacOS 13以降です。これは対応形式と最小OSバージョンを示すもので、各Macでの動作認証を意味しません。
 
 ### 2. アプリをインストール
 
@@ -69,7 +69,7 @@ DMGには両方のCPU向けの実行形式が含まれています。最低OSバ
 
 ## 開発者・ソースから起動する場合
 
-GitHub ReleasesのAssetsにある **`Desktop Mascot-2.3.4-universal.zip`** は、アプリと説明書類を含むZIP版です。通常はDMGからの導入が簡単です。このZIPにはREADME、START_HERE、説明書、ライセンス情報も含まれます。ソースから起動する場合は、GitHub上のソースコードを取得してください。
+GitHub ReleasesのAssetsにある **`Desktop.Mascot-2.3.4-universal.zip`** は、アプリと説明書類を含むZIP版です。通常はDMGからの導入が簡単です。このZIPにはREADME、START_HERE、説明書、ライセンス情報も含まれます。ソースから起動する場合は、GitHub上のソースコードを取得してください。
 
 Node.jsのLTS版を用意し、ソースフォルダで次を実行します。
 
