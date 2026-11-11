@@ -267,21 +267,3 @@ test('null and undefined numeric values keep their default display', async () =>
     assert.equal(settings.nodes.get('effect-offset-y').value, 12);
   });
 });
-
-test('prepareDistributionDefaults consistently reports whether it completed', async () => {
-  await withTemporaryProject(async ({ projectRoot }) => {
-    const packaged = loadSettingsForTest({
-      projectRoot,
-      mascotAPI: { getAppInfo: async () => ({ isPackaged: true }) },
-    });
-    await packaged.api.loadConfiguration();
-    assert.equal(await packaged.api.prepareDistributionDefaults(), false);
-
-    const development = loadSettingsForTest({
-      projectRoot,
-      mascotAPI: { prepareDistributionDefaults: async () => ({ ok: true }) },
-    });
-    await development.api.loadConfiguration();
-    assert.equal(await development.api.prepareDistributionDefaults(), true);
-  });
-});

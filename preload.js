@@ -42,12 +42,6 @@ contextBridge.exposeInMainWorld('mascotAPI', {
       return '';
     }
   },
-  getAppInfo() {
-    return ipcRenderer.invoke('mascot:get-app-info');
-  },
-  prepareDistributionDefaults() {
-    return ipcRenderer.invoke('mascot:prepare-distribution-defaults');
-  },
   saveConfig(config, previewActionIndex = null) {
     return ipcRenderer.invoke('mascot:save-config', { config, previewActionIndex });
   },

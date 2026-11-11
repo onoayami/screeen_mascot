@@ -17,7 +17,6 @@ const { pathToFileURL } = require('url');
 const {
   installDefaultsFromSource,
   recoverDirectoryTransaction,
-  replaceDirectoryTransaction,
   replaceFileAtomically,
 } = require('./shared/distribution-defaults');
 const {
@@ -1820,37 +1819,6 @@ registerIpcHandler('mascot:save-transparent-png', 'settings', (_event, payload) 
     payload?.category,
     payload?.originalName,
   );
-});
-
-registerIpcHandler('mascot:get-app-info', 'settings', () => ({ isPackaged: app.isPackaged }));
-
-function prepareDistributionDefaultsForDevelopment() {
-  if (app.isPackaged) {
-    throw new Error('この操作は開発用プロジェクトでのみ使用できます。');
-  }
-  recoverDevelopmentDistributionDefaults();
-  const { config, characterDirectory } = loadNormalizedConfig({ persistMigration: false });
-  const destinationRoot = getBundledCharacterDirectory();
-  return replaceDirectoryTransaction({
-    sourceRoot: characterDirectory,
-    destinationRoot,
-    config,
-    fsModule: fs,
-    validateAsset: validateImageDecodes,
-  });
-}
-
-registerIpcHandler('mascot:prepare-distribution-defaults', 'settings', () => {
-  try {
-    const result = prepareDistributionDefaultsForDevelopment();
-    return { ok: true, ...result };
-  } catch (error) {
-    return {
-      ok: false,
-      error: `配布用設定を準備できませんでした：${String(error?.message || error)}`,
-      recoveryPath: getBundledCharacterDirectory(),
-    };
-  }
 });
 
 registerIpcHandler('mascot:save-config', 'settings', async (_event, payload) => {

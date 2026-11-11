@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { loadMainForTest } from '../phase0/helpers/loaders.mjs';
 import {
@@ -17,19 +16,21 @@ function isStagingTarget(target, destination) {
 }
 
 function invokePrepare(main) {
-  const senderFrame = {
-    url: pathToFileURL(path.join(main.context.__dirname, 'settings.html')).href,
-  };
-  const sender = {
-    id: 1,
-    mainFrame: senderFrame,
-    isDestroyed: () => false,
-  };
-  main.api.setSettingsWindow({
-    isDestroyed: () => false,
-    webContents: sender,
-  });
-  return main.handlers.get('mascot:prepare-distribution-defaults')({ sender, senderFrame });
+  try {
+    const projectRequire = createRequire(path.join(main.context.__dirname, 'main.js'));
+    main.api.recoverDevelopmentDistributionDefaults();
+    const { config, characterDirectory } = main.api.loadNormalizedConfig({ persistMigration: false });
+    const result = projectRequire('./shared/distribution-defaults').replaceDirectoryTransaction({
+      sourceRoot: characterDirectory,
+      destinationRoot: main.api.getBundledCharacterDirectory(),
+      config,
+      fsModule: main.api.fsModule,
+      validateAsset: main.api.validateImageDecodes,
+    });
+    return { ok: true, ...result };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error) };
+  }
 }
 
 test('A1-01: distribution failure is structured and preserves the previous default', async () => {

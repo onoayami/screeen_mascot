@@ -9,8 +9,6 @@ const REQUIRED_MASCOT_API_METHODS = Object.freeze([
   'importImage',
   'saveTransparentPng',
   'getPathForFile',
-  'getAppInfo',
-  'prepareDistributionDefaults',
   'saveConfig',
 ]);
 
@@ -95,7 +93,6 @@ const elements = {
   effectOffsetX: document.getElementById('effect-offset-x'),
   effectOffsetY: document.getElementById('effect-offset-y'),
   effectWhileStill: document.getElementById('effect-while-still'),
-  prepareReleaseButton: document.getElementById('prepare-release-button'),
   reloadButton: document.getElementById('reload-button'),
   headerSaveButton: document.getElementById('save-button-header'),
   saveButton: document.getElementById('save-button'),
@@ -186,7 +183,6 @@ const state = {
   dirty: false,
   applyRetry: false,
   busy: false,
-  isPackaged: true,
   revision: 0,
   operationCounter: 0,
   activeOperation: null,
@@ -587,7 +583,6 @@ function disableUnavailableEditor() {
   for (const element of Object.values(elements)) {
     if (element && 'disabled' in element) element.disabled = true;
   }
-  elements.prepareReleaseButton.hidden = true;
   elements.actionEditor.hidden = true;
   elements.emptyState.hidden = false;
   elements.saveState.textContent = 'デスクトップアプリが必要';
@@ -605,7 +600,6 @@ function setBusy(busy) {
   if (busy) stopMovementSpeedPreview();
   updateSaveButtons();
   elements.reloadButton.disabled = busy;
-  elements.prepareReleaseButton.disabled = busy;
   elements.addAction.disabled = busy || state.actions.length >= MAX_ACTIONS;
   elements.actionFitInFrame.disabled = busy;
   elements.openSizeManager.disabled = busy;
@@ -895,13 +889,8 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
     elements.saveState.textContent = '読み込み中';
     elements.saveState.classList.remove('is-dirty', 'is-saved');
 
-    const [editable, appInfo] = await Promise.all([
-      window.mascotAPI.loadConfig(),
-      window.mascotAPI.getAppInfo(),
-    ]);
+    const editable = await window.mascotAPI.loadConfig();
     const { config } = editable || {};
-    state.isPackaged = Boolean(appInfo?.isPackaged);
-    elements.prepareReleaseButton.hidden = state.isPackaged;
     const warnings = Array.isArray(editable?.warnings) ? editable.warnings : [];
     const recovery = editable?.recovery || { kind: 'none' };
     const needsRecovery = !config || warnings.length > 0;
@@ -3226,36 +3215,6 @@ async function saveSelectedAction() {
   }
 }
 
-async function prepareDistributionDefaults() {
-  if (!state.apiAvailable) {
-    disableUnavailableEditor();
-    return false;
-  }
-  if (state.isPackaged) return false;
-  if (state.dirty) {
-    const saved = await saveConfiguration();
-    if (!saved) return false;
-  }
-
-  const operation = beginOperation('prepare-distribution');
-  if (!operation) return false;
-  try {
-    const result = await window.mascotAPI.prepareDistributionDefaults();
-    if (!result?.ok) {
-      throw new Error(result?.error || '配布用設定を準備できませんでした。');
-    }
-    showToast('現在の画像と設定を、配布版の初期状態へ反映しました。');
-    elements.feedback.textContent = '配布版へ反映済みです。次はアプリをビルドできます。';
-    return true;
-  } catch (error) {
-    console.error(error);
-    showError(readableError(error));
-    return false;
-  } finally {
-    endOperation(operation);
-  }
-}
-
 elements.mascotSize.addEventListener('input', () => {
   if (!state.config?.mascot) return;
   state.config.mascot.size = numberOr(elements.mascotSize.value, 180);
@@ -3391,7 +3350,6 @@ elements.imageEditButton.addEventListener('click', openImageEditor);
 setupDropzone(elements.actionDropzone, 'actions', applyImportedActionImage);
 setupDropzone(elements.effectDropzone, 'effects', applyImportedEffectImage);
 
-elements.prepareReleaseButton.addEventListener('click', prepareDistributionDefaults);
 elements.recoveryBackup.addEventListener('click', () => recoverConfiguration('backup'));
 elements.recoveryDefaults.addEventListener('click', () => recoverConfiguration('defaults'));
 elements.reloadButton.addEventListener('click', () => loadConfiguration({ askBeforeDiscard: true }));

@@ -60,6 +60,7 @@ const APPROVED_RELEASE_SCRIPTS = Object.freeze({
 const APPROVED_RELEASE_METADATA = Object.freeze({
   author: 'onoayami',
   appId: 'com.github.onoayami.desktopmascot',
+  version: '1.0.0',
   devDependencies: Object.freeze({
     electron: '45.2.3',
     'electron-builder': '26.18.0',
@@ -108,6 +109,8 @@ export function assertPackageOnlyAddsApprovedReleaseChanges(projectRoot = PROJEC
     assert.equal(current.scripts?.[scriptName], command, `unexpected ${scriptName}`);
     delete current.scripts[scriptName];
   }
+  assert.equal(current.version, APPROVED_RELEASE_METADATA.version, 'unexpected version');
+  current.version = baseline.version;
   assert.equal(current.author, APPROVED_RELEASE_METADATA.author, 'unexpected author');
   current.author = baseline.author;
   assert.equal(current.build?.appId, APPROVED_RELEASE_METADATA.appId, 'unexpected build.appId');
@@ -128,6 +131,8 @@ export function assertPackageOnlyAddsApprovedReleaseChanges(projectRoot = PROJEC
   const lockPath = path.join(projectRoot, 'package-lock.json');
   if (fs.existsSync(lockPath)) {
     const lock = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    assert.equal(lock.version, APPROVED_RELEASE_METADATA.version, 'unexpected lockfile version');
+    assert.equal(lock.packages?.['']?.version, APPROVED_RELEASE_METADATA.version, 'unexpected root lockfile version');
     for (const dependency of Object.keys(expectedDependencies)) {
       const declared = current.devDependencies?.[dependency];
       assert.equal(lock.packages?.['']?.devDependencies?.[dependency], declared);

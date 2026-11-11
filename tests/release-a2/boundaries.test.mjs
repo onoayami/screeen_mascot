@@ -168,12 +168,10 @@ test('A2-10: settings preload exposes no mascot-only capabilities', async () => 
     assert.deepEqual(Object.keys(preload.api).sort(), [
       'chooseImage',
       'discardImportedImage',
-      'getAppInfo',
       'getAssetMetadata',
       'getPathForFile',
       'importImage',
       'loadConfig',
-      'prepareDistributionDefaults',
       'recoverConfig',
       'reportDirtyState',
       'resolveAsset',
@@ -182,6 +180,22 @@ test('A2-10: settings preload exposes no mascot-only capabilities', async () => 
     ]);
     await preload.api.getPathForFile({});
     assert.equal(preload.invoked.at(-1).channel, 'mascot:register-dropped-path');
+  });
+});
+
+test('retired distribution preparation is absent from the UI, preload, and IPC', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const main = loadMainForTest({ projectRoot, userDataRoot });
+    const preload = loadPreloadForTest({ projectRoot });
+    const html = fs.readFileSync(path.join(projectRoot, 'settings.html'), 'utf8');
+    const settings = fs.readFileSync(path.join(projectRoot, 'settings.js'), 'utf8');
+
+    assert.equal(main.handlers.has('mascot:prepare-distribution-defaults'), false);
+    assert.equal(main.handlers.has('mascot:get-app-info'), false);
+    assert.equal(Object.hasOwn(preload.api, 'prepareDistributionDefaults'), false);
+    assert.equal(Object.hasOwn(preload.api, 'getAppInfo'), false);
+    assert.doesNotMatch(html, /prepare-release-button/);
+    assert.doesNotMatch(settings, /prepareDistributionDefaults|prepare-release-button|getAppInfo/);
   });
 });
 
@@ -269,7 +283,7 @@ test('A2-13: missing desktop API disables editing instead of installing a succes
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(settings.window.mascotAPI, undefined);
-    for (const id of ['save-button', 'reload-button', 'prepare-release-button', 'add-action']) {
+    for (const id of ['save-button', 'reload-button', 'add-action']) {
       assert.equal(settings.nodes.get(id)?.disabled, true, id);
     }
     assert.match(settings.nodes.get('feedback')?.textContent || '', /デスクトップアプリ|利用できません/);

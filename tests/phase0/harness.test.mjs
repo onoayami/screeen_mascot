@@ -75,6 +75,7 @@ test('Phase 0: only approved release metadata and matching dependency locks are 
     assertPackageOnlyAddsApprovedReleaseChanges(projectRoot);
 
     const invalidChanges = [
+      [(pkg) => { pkg.version = '1.0.1'; }, /unexpected version/],
       [(pkg) => { pkg.author = 'someone-else'; }, /unexpected author/],
       [(pkg) => { pkg.build.appId = 'com.invalid.other'; }, /unexpected build\.appId/],
       [(pkg) => { pkg.devDependencies.electron = '45.2.2'; }, /unexpected devDependency electron/],
@@ -89,8 +90,12 @@ test('Phase 0: only approved release metadata and matching dependency locks are 
 
     fs.writeFileSync(packagePath, `${JSON.stringify(original, null, 2)}\n`);
     const validLock = {
+      version: '1.0.0',
       packages: {
-        '': { devDependencies: { electron: '45.2.3', 'electron-builder': '26.18.0' } },
+        '': {
+          version: '1.0.0',
+          devDependencies: { electron: '45.2.3', 'electron-builder': '26.18.0' },
+        },
         'node_modules/electron': { version: '45.2.3' },
         'node_modules/electron-builder': { version: '26.18.0' },
       },

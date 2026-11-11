@@ -161,40 +161,6 @@ test('T08: localStorage write failures do not escape savePosition', async () => 
   });
 });
 
-test('T09: distribution copy failure preserves the existing bundled default', async () => {
-  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
-    const destination = path.join(projectRoot, 'characters', 'default');
-    const before = recursiveManifest(destination);
-    const main = loadMainForTest({
-      projectRoot,
-      userDataRoot,
-      fsOverrides: {
-        cpSync(source, target, options) {
-          if (path.resolve(target) === path.resolve(destination)) throw new Error('injected copy failure');
-          return fs.cpSync(source, target, options);
-        },
-        copyFileSync(source, target, ...rest) {
-          if (path.resolve(String(target)).startsWith(`${path.resolve(destination)}.staging-`)) {
-            throw new Error('injected copy failure');
-          }
-          return fs.copyFileSync(source, target, ...rest);
-        },
-      },
-    });
-
-    let failureMessage = '';
-    try {
-      const settingsEvent = installTrustedWindow(main, projectRoot, 'settings');
-      const result = await main.handlers.get('mascot:prepare-distribution-defaults')(settingsEvent);
-      if (!result?.ok) failureMessage = String(result?.error || '');
-    } catch (error) {
-      failureMessage = String(error?.message || error);
-    }
-    assert.match(failureMessage, /injected copy failure/);
-    assert.deepEqual(recursiveManifest(destination), before);
-  });
-});
-
 test('T10: build check rejects invalid ranges and directory assets', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     writeJson(path.join(projectRoot, 'characters', 'default', 'config.json'), {
