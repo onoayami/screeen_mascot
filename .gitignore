@@ -21,3 +21,17 @@ characters/default.staging-*/
 *.blockmap
 *.tgz
 coverage/
+
+# Superseded review and release reports
+/コードレビュー結果.md
+/コードレビュー結果_2026-11-09.md
+/tests/FINAL_AUTOMATED_VALIDATION_REPORT.md
+/tests/phase0/PHASE0_REPORT.md
+/tests/phase0/T01-T15.md
+/tests/phase0/results/v2.3.4-summary.json
+/tests/release-a1/RELEASE_A1_REPORT.md
+/tests/release-a2/RELEASE_A2_REPORT.md
+/tests/release-a3/EXTERNAL_VALIDATION_KIT_REPORT.md
+/tests/release-a3/RELEASE_A3_AUTOMATION_REPORT.md
+/tests/release-c/RELEASE_C_REPORT.md
+/tests/release-d/RELEASE_D_REPORT.md
