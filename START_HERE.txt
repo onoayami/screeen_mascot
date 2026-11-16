@@ -4,8 +4,8 @@ DESKTOP MASCOT v1
 macOS 13以降のApple Silicon／Intel Mac向けアプリです。
 インストールと基本操作はREADME.mdをご覧ください。
 
-1. DMGを開き、Desktop Mascot-v1.appをアプリケーションフォルダへドラッグ
-2. アプリケーションフォルダからDesktop Mascot-v1を起動
+1. DMGを開き、Desktop Mascot.appをアプリケーションフォルダへドラッグ
+2. アプリケーションフォルダからDesktop Mascotを起動
 3. 🪼メニューの「設定を開く…」から画像と動きを設定
 4. 「保存して反映」を押す
 

@@ -1,6 +1,6 @@
 # 03｜Macアプリの作成と配布
 
-> Desktop Mascot-v1（内部バージョン1.0.0）の保守担当者向けビルド手順です。Universal版はIntel／Apple Silicon向けで、最小OSバージョンはmacOS 13です。
+> Desktop Mascot v1（内部バージョン1.0.0）の保守担当者向けビルド手順です。Universal版はIntel／Apple Silicon向けで、最小OSバージョンはmacOS 13です。
 
 ## 全体の流れ
 
@@ -16,15 +16,15 @@
 
 ```json
 {
-  "productName": "Desktop Mascot-v1",
+  "productName": "Desktop Mascot",
   "version": "1.0.0",
   "author": "あなたの名前",
   "build": {
     "appId": "com.github.onoayami.desktopmascot",
-    "productName": "Desktop Mascot-v1",
+    "productName": "Desktop Mascot",
     "artifactName": "Desktop.Mascot-v1.${ext}",
     "dmg": {
-      "title": "Desktop Mascot-v1"
+      "title": "Desktop Mascot"
     }
   }
 }

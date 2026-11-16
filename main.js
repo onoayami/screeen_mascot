@@ -1728,7 +1728,7 @@ function createMascotWindow() {
 function createTray() {
   tray = new Tray(nativeImage.createEmpty());
   tray.setTitle('🪼');
-  tray.setToolTip('Desktop Mascot-v1');
+  tray.setToolTip('Desktop Mascot');
   rebuildTrayMenu();
 }
 
@@ -1855,7 +1855,7 @@ registerIpcHandler('mascot:save-config', 'settings', async (_event, payload) => 
 
 function startApplication() {
   if (process.platform !== 'darwin') {
-    dialog.showErrorBox('対応していないOSです', 'Desktop Mascot-v1 は現在 macOS 専用です。');
+    dialog.showErrorBox('対応していないOSです', 'Desktop Mascot は現在 macOS 専用です。');
     requestAppQuit('unsupported-platform');
     return;
   }

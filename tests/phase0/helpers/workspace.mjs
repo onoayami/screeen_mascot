@@ -61,9 +61,9 @@ const APPROVED_RELEASE_METADATA = Object.freeze({
   author: 'onoayami',
   appId: 'com.github.onoayami.desktopmascot',
   version: '1.0.0',
-  productName: 'Desktop Mascot-v1',
+  productName: 'Desktop Mascot',
   artifactName: 'Desktop.Mascot-v1.${ext}',
-  dmgTitle: 'Desktop Mascot-v1',
+  dmgTitle: 'Desktop Mascot',
   devDependencies: Object.freeze({
     electron: '45.2.3',
     'electron-builder': '26.18.0',
