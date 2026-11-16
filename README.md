@@ -1,4 +1,4 @@
-# Desktop Mascot v1.0.0
+# Desktop Mascot-v1
 
 好きな画像と動きを設定して、Macの画面上でマスコットを動かせるアプリです。
 
@@ -6,9 +6,9 @@
 
 macOS 13以降のApple Silicon／Intel Macに対応するUniversal版です。
 
-[Desktop Mascot v1.0.0 をダウンロード](https://github.com/onoayami/screeen_mascot/releases/tag/v1.0.0)
+[ダウンロードページ](https://github.com/onoayami/screeen_mascot/releases/latest)
 
-リリースのAssetsから **`Desktop.Mascot-1.0.0-universal.dmg`** をダウンロードし、開いたウィンドウの **Desktop Mascot.app** を **アプリケーション** フォルダへドラッグします。コピー後、アプリケーションフォルダから起動してください。
+リリースのAssetsから **`Desktop.Mascot-v1.dmg`** をダウンロードし、開いたウィンドウの **Desktop Mascot-v1.app** を **アプリケーション** フォルダへドラッグします。コピー後、アプリケーションフォルダから起動してください。
 
 ダウンロード元を確認したうえで、macOSが起動を止めた場合は、**システム設定 → プライバシーとセキュリティ → このまま開く** を選んでください。
 

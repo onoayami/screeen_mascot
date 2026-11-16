@@ -17,6 +17,7 @@ function runScript(source, context, filename) {
 export function loadMainForTest({
   projectRoot,
   userDataRoot,
+  appDataRoot = userDataRoot ? path.dirname(userDataRoot) : path.join(projectRoot, '.phase0-app-data'),
   fsOverrides = {},
   appOverrides = {},
   screenOverrides = {},
@@ -34,6 +35,11 @@ export function loadMainForTest({
   const powerMonitorListeners = new Map();
   const appListeners = new Map();
   const quitState = { calls: 0, completed: 0 };
+  const pathCalls = [];
+  const appPaths = new Map([
+    ['appData', appDataRoot],
+    ['userData', userDataRoot || path.join(appDataRoot, 'Desktop Mascot')],
+  ]);
   const projectRequire = createRequire(path.join(projectRoot, 'main.js'));
   const wrappedFs = new Proxy(fs, {
     get(target, property) {
@@ -45,7 +51,10 @@ export function loadMainForTest({
 
   const app = {
     isPackaged: false,
-    requestSingleInstanceLock: () => true,
+    requestSingleInstanceLock() {
+      pathCalls.push({ method: 'requestSingleInstanceLock' });
+      return true;
+    },
     quit() {
       quitState.calls += 1;
       const event = {
@@ -63,7 +72,15 @@ export function loadMainForTest({
       app.emit('will-quit');
       return true;
     },
-    getPath: () => userDataRoot,
+    getPath(name) {
+      pathCalls.push({ method: 'getPath', name });
+      if (!appPaths.has(name)) throw new Error(`Unknown app path: ${name}`);
+      return appPaths.get(name);
+    },
+    setPath(name, value) {
+      pathCalls.push({ method: 'setPath', name, value });
+      appPaths.set(name, value);
+    },
     whenReady: () => new Promise(() => {}),
     on(type, listener) {
       if (!appListeners.has(type)) appListeners.set(type, []);
@@ -361,6 +378,8 @@ export function loadMainForTest({
     shownItems,
     menus,
     trayInstances,
+    pathCalls,
+    appPaths,
   };
 }
 

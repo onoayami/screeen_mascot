@@ -1,6 +1,6 @@
 {
   "name": "desktop-mascot-ui",
-  "productName": "Desktop Mascot",
+  "productName": "Desktop Mascot-v1",
   "version": "1.0.0",
   "description": "A transparent desktop mascot with never-lost screen recovery, verified live apply, effect preview, and no-code image editing",
   "author": "onoayami",
@@ -35,9 +35,9 @@
   },
   "build": {
     "appId": "com.github.onoayami.desktopmascot",
-    "productName": "Desktop Mascot",
+    "productName": "Desktop Mascot-v1",
     "asar": true,
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "artifactName": "Desktop.Mascot-v1.${ext}",
     "directories": {
       "buildResources": "build",
       "output": "dist"
@@ -66,7 +66,7 @@
       "gatekeeperAssess": false
     },
     "dmg": {
-      "title": "${productName} ${version}"
+      "title": "Desktop Mascot-v1"
     }
   }
 }

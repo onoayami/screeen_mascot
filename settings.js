@@ -72,6 +72,7 @@ const elements = {
   movementType: document.getElementById('movement-type'),
   movementSpeed: document.getElementById('movement-speed'),
   speedOutput: document.getElementById('speed-output'),
+  movementSpeedPreview: document.getElementById('movement-speed-preview'),
   movementSpeedPreviewStage: document.getElementById('movement-speed-preview-stage'),
   movementSpeedPreviewImage: document.getElementById('movement-speed-preview-image'),
   movementSpeedPreviewNote: document.getElementById('movement-speed-preview-note'),
@@ -408,9 +409,33 @@ function stopMovementSpeedPreview(message = '速さを変更するとプレビ�
   movementPreviewRunning = false;
   movementPreviewLastTimestamp = null;
   movementPreviewActionId = null;
+  movementPreviewPosition = 0;
+  movementPreviewDirection = 1;
+  elements.movementSpeedPreview.hidden = true;
   elements.movementSpeedPreviewImage.hidden = true;
   elements.movementSpeedPreviewStop.disabled = true;
+  elements.movementSpeedPreviewStop.textContent = '止める';
   elements.movementSpeedPreviewNote.textContent = message;
+}
+
+function showMovementSpeedPreviewStatus(message) {
+  stopMovementSpeedPreview(message);
+  elements.movementSpeedPreview.hidden = false;
+}
+
+function toggleMovementSpeedPreview() {
+  if (movementPreviewRunning) {
+    if (movementPreviewFrame !== null) {
+      window.cancelAnimationFrame(movementPreviewFrame);
+      movementPreviewFrame = null;
+    }
+    movementPreviewRunning = false;
+    movementPreviewLastTimestamp = null;
+    elements.movementSpeedPreviewStop.textContent = '再開';
+    elements.movementSpeedPreviewNote.textContent = 'プレビューを停止しました。速さを変更するか再開できます。';
+    return;
+  }
+  startMovementSpeedPreview(selectedAction());
 }
 
 function movementPreviewImageTransform(action, direction) {
@@ -433,7 +458,7 @@ function animateMovementSpeedPreview(timestamp) {
   const stage = elements.movementSpeedPreviewStage.getBoundingClientRect();
   const travelSpan = stage.width - (8 * 2) - 76;
   if (!(travelSpan > 0)) {
-    stopMovementSpeedPreview('プレビュー欄に移動できる幅がありません。');
+    showMovementSpeedPreviewStatus('プレビュー欄に移動できる幅がありません。');
     return;
   }
   const deltaSeconds = movementPreviewLastTimestamp === null
@@ -467,15 +492,15 @@ function startMovementSpeedPreview(action) {
     return;
   }
   if (!action || action.movement?.type === 'still') {
-    stopMovementSpeedPreview('この動作はその場に留まるため、速度プレビューはありません。');
+    showMovementSpeedPreviewStatus('この動作はその場に留まるため、速度プレビューはありません。');
     return;
   }
   if (!action._assetUrl) {
-    stopMovementSpeedPreview('画像を設定すると速度プレビューを表示できます。');
+    showMovementSpeedPreviewStatus('画像を設定すると速度プレビューを表示できます。');
     return;
   }
   if (!Number.isFinite(speed) || speed <= 0 || speed > SETTINGS_RULES.movementSpeed.maximum) {
-    stopMovementSpeedPreview('0より大きい速さに変更するとプレビューします。');
+    showMovementSpeedPreviewStatus('0より大きい速さに変更するとプレビューします。');
     return;
   }
   if (movementPreviewRunning && movementPreviewActionId === action._uiId) {
@@ -483,25 +508,32 @@ function startMovementSpeedPreview(action) {
     return;
   }
 
-  stopMovementSpeedPreview();
+  const resumePausedPreview = movementPreviewActionId === action._uiId
+    && !movementPreviewRunning
+    && !elements.movementSpeedPreviewImage.hidden;
+  if (!resumePausedPreview) stopMovementSpeedPreview();
+  elements.movementSpeedPreview.hidden = false;
   const stage = elements.movementSpeedPreviewStage.getBoundingClientRect();
   if (!(stage.width - (8 * 2) - 76 > 0)) {
-    elements.movementSpeedPreviewNote.textContent = 'プレビュー欄に移動できる幅がありません。';
+    showMovementSpeedPreviewStatus('プレビュー欄に移動できる幅がありません。');
     return;
   }
+  if (!resumePausedPreview) {
+    movementPreviewActionId = action._uiId;
+    movementPreviewPosition = 0;
+    movementPreviewDirection = 1;
+    elements.movementSpeedPreviewImage.src = action._assetUrl;
+    elements.movementSpeedPreviewImage.hidden = false;
+    elements.movementSpeedPreviewImage.style.left = '8px';
+    applyImageTransform(
+      elements.movementSpeedPreviewImage,
+      movementPreviewImageTransform(action, movementPreviewDirection),
+    );
+  }
   movementPreviewRunning = true;
-  movementPreviewActionId = action._uiId;
-  movementPreviewPosition = 0;
-  movementPreviewDirection = 1;
   movementPreviewLastTimestamp = null;
-  elements.movementSpeedPreviewImage.src = action._assetUrl;
-  elements.movementSpeedPreviewImage.hidden = false;
-  elements.movementSpeedPreviewImage.style.left = '8px';
-  applyImageTransform(
-    elements.movementSpeedPreviewImage,
-    movementPreviewImageTransform(action, movementPreviewDirection),
-  );
   elements.movementSpeedPreviewStop.disabled = false;
+  elements.movementSpeedPreviewStop.textContent = '止める';
   elements.movementSpeedPreviewNote.textContent = `横移動をプレビュー中：${speed} px/秒`;
   movementPreviewFrame = window.requestAnimationFrame(animateMovementSpeedPreview);
 }
@@ -3268,11 +3300,15 @@ elements.movementType.addEventListener('change', () => {
 });
 elements.movementSpeed.addEventListener('input', () => {
   const previewAction = selectedAction();
-  editSelectedAction((action) => {
-    action.movement.speed = readNumberInput(elements.movementSpeed.value);
-  });
+  const speedChanged = readNumberInput(elements.movementSpeed.value)
+    !== readNumberInput(previewAction?.movement?.speed);
+  if (speedChanged) {
+    editSelectedAction((action) => {
+      action.movement.speed = readNumberInput(elements.movementSpeed.value);
+    });
+  }
   elements.speedOutput.textContent = elements.movementSpeed.value;
-  startMovementSpeedPreview(previewAction);
+  if (speedChanged) startMovementSpeedPreview(previewAction);
 });
 
 elements.effectEnabled.addEventListener('change', () => {
@@ -3344,7 +3380,7 @@ elements.durationBulkSpeedEnabled.addEventListener('change', () => {
   updateDurationBulkCount();
 });
 elements.movementSpeedPreviewStop.addEventListener('click', () => {
-  stopMovementSpeedPreview('プレビューを停止しました。速さを変更すると再生できます。');
+  toggleMovementSpeedPreview();
 });
 elements.imageEditButton.addEventListener('click', openImageEditor);
 setupDropzone(elements.actionDropzone, 'actions', applyImportedActionImage);

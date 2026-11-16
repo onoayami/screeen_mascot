@@ -61,6 +61,9 @@ const APPROVED_RELEASE_METADATA = Object.freeze({
   author: 'onoayami',
   appId: 'com.github.onoayami.desktopmascot',
   version: '1.0.0',
+  productName: 'Desktop Mascot-v1',
+  artifactName: 'Desktop.Mascot-v1.${ext}',
+  dmgTitle: 'Desktop Mascot-v1',
   devDependencies: Object.freeze({
     electron: '45.2.3',
     'electron-builder': '26.18.0',
@@ -111,10 +114,18 @@ export function assertPackageOnlyAddsApprovedReleaseChanges(projectRoot = PROJEC
   }
   assert.equal(current.version, APPROVED_RELEASE_METADATA.version, 'unexpected version');
   current.version = baseline.version;
+  assert.equal(current.productName, APPROVED_RELEASE_METADATA.productName, 'unexpected productName');
+  current.productName = baseline.productName;
   assert.equal(current.author, APPROVED_RELEASE_METADATA.author, 'unexpected author');
   current.author = baseline.author;
   assert.equal(current.build?.appId, APPROVED_RELEASE_METADATA.appId, 'unexpected build.appId');
   if (current.build && typeof current.build === 'object') current.build.appId = baseline.build.appId;
+  assert.equal(current.build?.productName, APPROVED_RELEASE_METADATA.productName, 'unexpected build.productName');
+  current.build.productName = baseline.build.productName;
+  assert.equal(current.build?.artifactName, APPROVED_RELEASE_METADATA.artifactName, 'unexpected build.artifactName');
+  current.build.artifactName = baseline.build.artifactName;
+  assert.equal(current.build?.dmg?.title, APPROVED_RELEASE_METADATA.dmgTitle, 'unexpected build.dmg.title');
+  current.build.dmg.title = baseline.build.dmg.title;
 
   const expectedDependencies = APPROVED_RELEASE_METADATA.devDependencies;
   assert.deepEqual(
@@ -245,7 +256,7 @@ export async function withTemporaryProject(callback) {
   const sourceBefore = currentProjectManifest();
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-mascot-phase0-'));
   const projectRoot = path.join(temporaryRoot, 'project');
-  const userDataRoot = path.join(temporaryRoot, 'user-data');
+  const userDataRoot = path.join(temporaryRoot, 'Desktop Mascot');
   const userCharacters = path.join(userDataRoot, 'characters');
   copyCurrentProjectTree(projectRoot);
   fs.mkdirSync(userDataRoot, { recursive: true });

@@ -175,19 +175,6 @@
                 </div>
               </div>
 
-              <div class="movement-speed-preview" aria-labelledby="movement-speed-preview-label">
-                <div class="movement-speed-preview-heading">
-                  <strong id="movement-speed-preview-label">速度プレビュー</strong>
-                  <button id="movement-speed-preview-stop" class="secondary-button" type="button" disabled>止める</button>
-                </div>
-                <div id="movement-speed-preview-stage" class="movement-speed-preview-stage" aria-hidden="true">
-                  <img id="movement-speed-preview-image" class="movement-speed-preview-image" alt="" hidden />
-                </div>
-                <p id="movement-speed-preview-note" class="movement-speed-preview-note" role="status">速さを変更するとプレビューします。</p>
-                <p class="movement-speed-preview-note">横移動で速さの目安を表示します（実際の移動方法とは異なります）。</p>
-                <p class="movement-speed-preview-note">画像は76px枠のサムネイル表示です。実寸ではありません。</p>
-              </div>
-
               <div class="field-grid movement-grid">
                 <label class="field">
                   <span>移動方法</span>
@@ -205,6 +192,18 @@
                   <span class="field-label-row">速さ（px/秒） <output id="speed-output">55</output></span>
                   <input id="movement-speed" type="range" min="0" max="300" step="1" />
                 </label>
+              </div>
+              <div id="movement-speed-preview" class="movement-speed-preview" aria-labelledby="movement-speed-preview-label" hidden>
+                <div class="movement-speed-preview-heading">
+                  <strong id="movement-speed-preview-label">速度プレビュー</strong>
+                  <button id="movement-speed-preview-stop" class="secondary-button" type="button" disabled>止める</button>
+                </div>
+                <div id="movement-speed-preview-stage" class="movement-speed-preview-stage" aria-hidden="true">
+                  <img id="movement-speed-preview-image" class="movement-speed-preview-image" alt="" hidden />
+                </div>
+                <p id="movement-speed-preview-note" class="movement-speed-preview-note" role="status">速さを変更するとプレビューします。</p>
+                <p class="movement-speed-preview-note">横移動で速さの目安を表示します（実際の移動方法とは異なります）。</p>
+                <p class="movement-speed-preview-note">画像は76px枠のサムネイル表示です。実寸ではありません。</p>
               </div>
             </section>
 

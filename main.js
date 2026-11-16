@@ -90,6 +90,18 @@ const RENDERER_DIAGNOSTIC_TYPES = new Set([
   'image-load-failed',
 ]);
 
+let userDataDirectory = 'Desktop Mascot';
+try {
+  userDataDirectory = path.join(app.getPath('appData'), userDataDirectory);
+  fs.mkdirSync(userDataDirectory, { recursive: true });
+  app.setPath('userData', userDataDirectory);
+} catch (error) {
+  throw new Error(
+    `利用者データフォルダを準備できませんでした。\n${userDataDirectory}\n${String(error?.message || error)}`,
+    { cause: error },
+  );
+}
+
 app.on('before-quit', (event) => {
   quitRequested = true;
   if (activeQuitAttemptSequence === null) beginQuitAttempt('native');
@@ -1602,10 +1614,6 @@ function rebuildTrayMenu() {
       },
       { type: 'separator' },
       { label: '画像・設定フォルダを開く', click: () => shell.openPath(getCharacterDirectory()) },
-      {
-        label: '診断ログを開く',
-        click: () => shell.showItemInFolder(path.join(app.getPath('userData'), 'mascot-diagnostics.log')),
-      },
       { label: '設定を再読み込み', click: () => sendMascotCommand('reload-config') },
       { type: 'separator' },
       { label: '終了', click: () => requestAppQuit('tray') },
@@ -1720,7 +1728,7 @@ function createMascotWindow() {
 function createTray() {
   tray = new Tray(nativeImage.createEmpty());
   tray.setTitle('🪼');
-  tray.setToolTip('Desktop Mascot');
+  tray.setToolTip('Desktop Mascot-v1');
   rebuildTrayMenu();
 }
 
@@ -1847,7 +1855,7 @@ registerIpcHandler('mascot:save-config', 'settings', async (_event, payload) => 
 
 function startApplication() {
   if (process.platform !== 'darwin') {
-    dialog.showErrorBox('対応していないOSです', 'Desktop Mascot は現在 macOS 専用です。');
+    dialog.showErrorBox('対応していないOSです', 'Desktop Mascot-v1 は現在 macOS 専用です。');
     requestAppQuit('unsupported-platform');
     return;
   }

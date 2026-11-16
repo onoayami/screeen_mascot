@@ -292,11 +292,20 @@ test('speed preview uses capped frame deltas, reflects at edges, and honors the 
     const action = movingAction();
     settings.api.state.actions = [action];
     settings.api.state.selectedId = action._uiId;
+    settings.api.elements.movementSpeedPreview.hidden = true;
     assert.equal(scheduler.pending.size, 0, 'loading an action must not start a preview');
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
+    const html = fs.readFileSync(path.join(projectRoot, 'settings.html'), 'utf8');
+    assert.ok(
+      html.indexOf('class="field-grid movement-grid"')
+        < html.indexOf('id="movement-speed-preview"'),
+      'the preview should follow the movement method and speed controls',
+    );
     settings.api.elements.movementSpeed.value = '300';
     settings.api.elements.movementSpeed.dispatchEvent({ type: 'input' });
 
     assert.equal(settings.api.movementPreviewState().running, true);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, false);
     assert.equal(settings.api.elements.movementSpeedPreviewImage.hidden, false);
     assert.match(settings.api.elements.movementSpeedPreviewImage.style.transform, /scaleX\(-1\)/);
     assert.equal(scheduler.pending.size, 1);
@@ -324,7 +333,7 @@ test('speed preview uses capped frame deltas, reflects at edges, and honors the 
   });
 });
 
-test('preview scheduling is singular and cleanup covers manual stop, selection changes, still actions, hidden page, and dialogs', async () => {
+test('preview pauses and resumes in place and cleanup covers selection changes, still actions, hidden page, and dialogs', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const scheduler = makeAnimationScheduler();
     const settings = loadSettingsForTest({
@@ -345,51 +354,90 @@ test('preview scheduling is singular and cleanup covers manual stop, selection c
     const revisionBeforeStop = settings.api.state.revision;
     const speedBeforeStop = action.movement.speed;
 
+    scheduler.frame(0);
+    scheduler.frame(50);
+    const positionBeforePause = settings.api.movementPreviewState().position;
     settings.api.elements.movementSpeedPreviewStop.dispatchEvent({ type: 'click' });
     assert.equal(settings.api.movementPreviewState().running, false);
     assert.equal(settings.api.movementPreviewState().frame, null);
     assert.equal(scheduler.pending.size, 0);
     assert.ok(scheduler.cancelled.length > 0);
+    assert.equal(settings.api.movementPreviewState().position, positionBeforePause);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, false);
+    assert.equal(settings.api.elements.movementSpeedPreviewImage.hidden, false);
+    assert.equal(settings.api.elements.movementSpeedPreviewStop.textContent, '再開');
     assert.equal(settings.api.state.revision, revisionBeforeStop);
     assert.equal(action.movement.speed, speedBeforeStop);
 
     speed.dispatchEvent({ type: 'input' });
+    assert.equal(settings.api.movementPreviewState().running, false, 'an unchanged speed must not resume a paused preview');
+    assert.equal(scheduler.pending.size, 0);
+    assert.equal(settings.api.state.revision, revisionBeforeStop, 'an unchanged speed must not mark the action modified');
+    settings.api.elements.movementSpeedPreviewStop.dispatchEvent({ type: 'click' });
+    assert.equal(settings.api.movementPreviewState().running, true);
+    assert.equal(settings.api.movementPreviewState().position, positionBeforePause);
+    assert.equal(settings.api.elements.movementSpeedPreviewStop.textContent, '止める');
+    assert.equal(scheduler.pending.size, 1);
+    scheduler.frame(1000);
+    assert.equal(settings.api.movementPreviewState().position, positionBeforePause, 'the first resumed frame must not jump');
+    scheduler.frame(1050);
+    assert.ok(settings.api.movementPreviewState().position > positionBeforePause);
+    settings.api.elements.movementSpeedPreviewStop.dispatchEvent({ type: 'click' });
+    const positionBeforeSpeedChange = settings.api.movementPreviewState().position;
+    speed.value = '100';
+    speed.dispatchEvent({ type: 'input' });
+    assert.equal(settings.api.movementPreviewState().running, true, 'changing speed while paused should resume the preview');
+    assert.equal(settings.api.movementPreviewState().position, positionBeforeSpeedChange);
+
     settings.api.state.selectedId = other._uiId;
     settings.api.renderEditor();
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
 
     settings.api.state.selectedId = action._uiId;
+    speed.value = '80';
     speed.dispatchEvent({ type: 'input' });
     settings.context.document.hidden = true;
     settings.context.document.dispatchEvent({ type: 'visibilitychange' });
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
     settings.context.document.hidden = false;
 
+    speed.value = '90';
     speed.dispatchEvent({ type: 'input' });
     speed.value = '90';
     settings.api.elements.movementType.value = 'still';
     settings.api.elements.movementType.dispatchEvent({ type: 'change' });
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
 
     action.movement.type = 'horizontal';
     settings.api.elements.movementType.value = 'horizontal';
+    speed.value = '80';
     speed.dispatchEvent({ type: 'input' });
     await settings.api.importImage('actions');
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
 
+    speed.value = '90';
     speed.dispatchEvent({ type: 'input' });
     settings.window.dispatch('pagehide');
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
 
+    speed.value = '80';
     speed.dispatchEvent({ type: 'input' });
     settings.api.elements.openDurationBulk.dispatchEvent({ type: 'click' });
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
     assert.equal(settings.api.elements.durationBulkDialog.open, true);
     settings.api.elements.durationBulkCancel.dispatchEvent({ type: 'click' });
 
+    speed.value = '90';
     speed.dispatchEvent({ type: 'input' });
     settings.api.elements.deleteAction.dispatchEvent({ type: 'click' });
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, true);
     assert.equal(settings.api.state.actions.some((candidate) => candidate._uiId === action._uiId), false);
   });
 });
@@ -408,11 +456,14 @@ test('preview reports a stage with no travel space without scheduling animation'
     settings.api.elements.movementSpeedPreviewStage.getBoundingClientRect = () => ({
       left: 0, top: 0, width: 90, height: 112, right: 90, bottom: 112,
     });
-    settings.api.elements.movementSpeed.value = '55';
+    settings.api.elements.movementSpeed.value = '60';
     settings.api.elements.movementSpeed.dispatchEvent({ type: 'input' });
 
     assert.equal(scheduler.pending.size, 0);
     assert.equal(settings.api.movementPreviewState().running, false);
+    assert.equal(settings.api.elements.movementSpeedPreview.hidden, false);
+    assert.equal(settings.api.elements.movementSpeedPreviewImage.hidden, true);
+    assert.equal(settings.api.elements.movementSpeedPreviewStop.disabled, true);
     assert.match(settings.api.elements.movementSpeedPreviewNote.textContent, /移動できる幅がありません/);
   });
 });

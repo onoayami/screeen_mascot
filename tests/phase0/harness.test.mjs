@@ -54,6 +54,55 @@ test('Phase 0: main, renderer, and settings VM loaders execute production source
   });
 });
 
+test('Phase 0: existing user data stays in the legacy folder before single-instance startup', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const appDataRoot = path.dirname(userDataRoot);
+    const configPath = path.join(userDataRoot, 'characters', 'config.json');
+    const existingConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    existingConfig.name = 'Legacy user settings';
+    existingConfig.mascot.size = 211;
+    fs.writeFileSync(configPath, `${JSON.stringify(existingConfig, null, 2)}\n`);
+    const originalConfig = fs.readFileSync(configPath);
+    const main = loadMainForTest({ projectRoot, userDataRoot });
+
+    assert.deepEqual(main.pathCalls.slice(0, 3), [
+      { method: 'getPath', name: 'appData' },
+      { method: 'setPath', name: 'userData', value: userDataRoot },
+      { method: 'requestSingleInstanceLock' },
+    ]);
+    assert.equal(main.api.getCharacterDirectory(), path.join(userDataRoot, 'characters'));
+    assert.equal(main.api.ensureCharacterDirectory(), path.join(userDataRoot, 'characters'));
+    assert.deepEqual(fs.readFileSync(configPath), originalConfig);
+
+    const loaded = main.api.loadNormalizedConfig({ persistMigration: false });
+    const writtenConfigPath = main.api.writeConfigAtomic(loaded.config);
+    assert.equal(writtenConfigPath, configPath);
+    assert.equal(loaded.config.name, 'Legacy user settings');
+    assert.equal(loaded.config.mascot.size, 211);
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(writtenConfigPath, 'utf8')),
+      JSON.parse(JSON.stringify(loaded.config)),
+    );
+
+    main.api.recordDiagnostic('legacy-user-data-regression');
+    main.api.flushDiagnosticsSync();
+    assert.ok(fs.existsSync(path.join(userDataRoot, 'mascot-diagnostics.log')));
+    assert.ok(!fs.existsSync(path.join(appDataRoot, 'Desktop Mascot-v1')));
+  });
+});
+
+test('Phase 0: first-run user-data folder is created at the legacy path', async () => {
+  await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
+    const appDataRoot = path.dirname(userDataRoot);
+    fs.rmSync(userDataRoot, { recursive: true, force: true });
+
+    const main = loadMainForTest({ projectRoot, userDataRoot });
+    assert.ok(fs.existsSync(userDataRoot));
+    assert.equal(main.api.getCharacterDirectory(), path.join(userDataRoot, 'characters'));
+    assert.ok(!fs.existsSync(path.join(appDataRoot, 'Desktop Mascot-v1')));
+  });
+});
+
 test('Phase 0: shared rule modules are pure and importable', () => {
   const rules = require(path.join(PROJECT_ROOT, 'shared', 'config-rules.js'));
   const assets = require(path.join(PROJECT_ROOT, 'shared', 'asset-validation.js'));
@@ -76,6 +125,10 @@ test('Phase 0: only approved release metadata and matching dependency locks are 
 
     const invalidChanges = [
       [(pkg) => { pkg.version = '1.0.1'; }, /unexpected version/],
+      [(pkg) => { pkg.productName = 'Other'; }, /unexpected productName/],
+      [(pkg) => { pkg.build.productName = 'Other'; }, /unexpected build\.productName/],
+      [(pkg) => { pkg.build.artifactName = 'Other.${ext}'; }, /unexpected build\.artifactName/],
+      [(pkg) => { pkg.build.dmg.title = 'Other'; }, /unexpected build\.dmg\.title/],
       [(pkg) => { pkg.author = 'someone-else'; }, /unexpected author/],
       [(pkg) => { pkg.build.appId = 'com.invalid.other'; }, /unexpected build\.appId/],
       [(pkg) => { pkg.devDependencies.electron = '45.2.2'; }, /unexpected devDependency electron/],

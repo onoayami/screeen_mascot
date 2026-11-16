@@ -1,6 +1,6 @@
 # 03｜Macアプリの作成と配布
 
-> Desktop Mascot v1.0.0の保守担当者向けビルド手順です。Universal版はIntel／Apple Silicon向けで、最小OSバージョンはmacOS 13です。
+> Desktop Mascot-v1（内部バージョン1.0.0）の保守担当者向けビルド手順です。Universal版はIntel／Apple Silicon向けで、最小OSバージョンはmacOS 13です。
 
 ## 全体の流れ
 
@@ -16,22 +16,26 @@
 
 ```json
 {
-  "productName": "あなたのアプリ名",
+  "productName": "Desktop Mascot-v1",
   "version": "1.0.0",
   "author": "あなたの名前",
   "build": {
     "appId": "com.github.onoayami.desktopmascot",
-    "productName": "あなたのアプリ名"
+    "productName": "Desktop Mascot-v1",
+    "artifactName": "Desktop.Mascot-v1.${ext}",
+    "dmg": {
+      "title": "Desktop Mascot-v1"
+    }
   }
 }
 ```
 
-- `productName`：FinderやDMGに表示する名前
-- `version`：最初は `1.0.0`。更新時は `1.0.1` などへ変更
+- `productName`：Finderに表示するアプリ名
+- `version`：内部バージョンは `1.0.0`
 - `author`：制作者名
 - `appId`：世界で重ならない識別子。例 `jp.example.myjellyfish`
 
-`productName` は上部と `build` 内の2か所を同じ名前にしてください。
+`productName` は上部と `build` 内の2か所を同じ名前にしてください。配布ファイル名は `artifactName` で固定し、DMG内の表示名は `dmg.title` で指定します。
 
 アプリアイコンは `build/icon.png` を1024×1024pxのPNGへ差し替えます。
 
@@ -84,12 +88,14 @@ npm run build:mac:universal
 完了後、`dist` フォルダに次のようなファイルができます。
 
 ```text
-Desktop Mascot-1.0.0-universal.dmg
-Desktop Mascot-1.0.0-universal.zip
+Desktop.Mascot-v1.dmg
+Desktop.Mascot-v1.zip
 ```
 
 通常は **`.dmg` を利用者へ配布**します。ソースコードのZIPではありません。
 ソースZIPの作成にはPython 3の`python3`コマンドが必要です。
+
+アプリ名変更後も既存の利用者データは `~/Library/Application Support/Desktop Mascot/` を引き続き使用します。
 
 ## 5. 配布方法は2段階あります
 
@@ -145,7 +151,7 @@ spctl --assess --type execute --verbose "dist/mac-universal/あなたのアプ�
 公証済みDMGの確認：
 
 ```bash
-xcrun stapler validate "dist/あなたのアプリ名-1.0.0-universal.dmg"
+xcrun stapler validate "dist/Desktop.Mascot-v1.dmg"
 ```
 
 ## 7. 実際に配る
@@ -166,7 +172,7 @@ xcrun stapler validate "dist/あなたのアプリ名-1.0.0-universal.dmg"
 可能ならSHA-256も掲載します。
 
 ```bash
-shasum -a 256 "dist/あなたのアプリ名-1.0.0-universal.dmg"
+shasum -a 256 "dist/Desktop.Mascot-v1.dmg"
 ```
 
 ## 8. 更新版を配る

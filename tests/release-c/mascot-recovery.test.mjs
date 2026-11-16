@@ -612,12 +612,10 @@ test('diagnostic logs rotate at 1 MiB and trusted IPC records no caller-supplied
 
     main.api.createTray();
     main.api.rebuildTrayMenu();
-    const diagnosticItem = main.trayInstances[0].contextMenu.template.find(
-      (item) => item.label === '診断ログを開く',
+    assert.equal(
+      main.trayInstances[0].contextMenu.template.some((item) => item.label === '診断ログを開く'),
+      false,
     );
-    assert.ok(diagnosticItem);
-    diagnosticItem.click();
-    assert.deepEqual(main.shownItems, [logPath]);
   });
 });
 
