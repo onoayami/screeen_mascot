@@ -282,6 +282,7 @@ function replaceFileAtomically({
 }
 
 module.exports = {
+  buildAndValidateStaging,
   collectReferencedAssetPaths,
   installDefaultsFromSource,
   listTreeFiles,

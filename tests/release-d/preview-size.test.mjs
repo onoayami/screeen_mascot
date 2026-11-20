@@ -132,6 +132,33 @@ test('actual-size dialog stays at 100%, reads unsaved size, and never saves on c
   assert.equal(api.state.config.mascot.size, 600);
 });
 
+test('139px actual-size preview stays unscaled in a compact, centered scroll viewport', () => {
+  const { elements } = setup(139);
+  const css = fs.readFileSync(path.join(PROJECT_ROOT, 'settings.css'), 'utf8');
+  const html = fs.readFileSync(path.join(PROJECT_ROOT, 'settings.html'), 'utf8');
+  const actualDialog = html.match(/<dialog id="actual-size-dialog"[\s\S]*?<\/dialog>/)?.[0];
+  const description = actualDialog?.match(/<p class="jpeg-dialog-description">([\s\S]*?)<\/p>/)?.[1];
+  click(elements.actionActualSize);
+  assert.equal(elements.actualSizeMascot.style.width, '139px');
+  assert.equal(elements.actualSizeScene.style.width, '139px');
+  assert.equal(elements.actualSizeScene.style.height, '139px');
+  assert.equal(elements.actualSizeMascot.style.left, '0px');
+  assert.equal(elements.actualSizeMascot.style.top, '0px');
+  assert.match(css, /\.jpeg-dialog\.actual-size-dialog\s*\{[^}]*width:\s*fit-content;[^}]*min-width:\s*min\(320px,\s*calc\(100vw - 32px\)\);[^}]*max-width:\s*calc\(100vw - 32px\);/);
+  assert.ok(css.indexOf('.jpeg-dialog.actual-size-dialog {') < css.indexOf('.jpeg-dialog { width: calc(100vw - 24px);'));
+  assert.match(css, /\.actual-size-dialog \.jpeg-dialog-description\s*\{[^}]*width:\s*max-content;[^}]*max-width:\s*100%;/);
+  assert.doesNotMatch(css, /\.actual-size-dialog \.jpeg-dialog-description\s*\{[^}]*contain:\s*inline-size;/);
+  assert.ok(description);
+  assert.deepEqual(description.split(/<br\s*\/?>/).map((line) => line.replace(/\s+/g, ' ').trim()), [
+    '調整中の内容を100%で表示します。',
+    '大きい場合は縦横にスクロールできます。',
+    'エフェクトは右向きの発生位置です。',
+  ]);
+  assert.doesNotMatch(description, /1 CSS px|開閉では保存・確定しません/);
+  assert.match(css, /\.actual-size-viewport\s*\{[^}]*width:\s*fit-content;[^}]*max-width:\s*100%;[^}]*margin-inline:\s*auto;[^}]*overflow:\s*auto;/);
+  click(elements.actualSizeClose);
+});
+
 test('screen clamp is shared with actual-size preview and distinguishes configured/effective sizes', () => {
   const { elements, window } = setup(1000);
   window.screen = { availWidth: 800, availHeight: 600 };
@@ -233,6 +260,23 @@ test('effect union fits negative offsets and tall aspect ratio uniformly; actual
   click(elements.effectActualSize);
   assert.equal(elements.actualSizeEffect.style.left, '100px');
   assert.equal(elements.actualSizeScene.style.width, '200px');
+  click(elements.actualSizeClose);
+});
+
+test('wide effects at large negative and positive offsets preserve the full actual-size union', () => {
+  const effect = { _assetUrl: 'data:image/png;base64,effect', size: 240, offsetX: -400, offsetY: -700 };
+  const { elements } = setup(139, effect);
+  elements.actualSizeEffect.naturalWidth = 400;
+  elements.actualSizeEffect.naturalHeight = 100;
+  click(elements.effectActualSize);
+  assert.equal(elements.actualSizeScene.style.width, '589.5px');
+  assert.equal(elements.actualSizeScene.style.height, '869px');
+  assert.equal(elements.actualSizeMascot.style.width, '139px');
+  assert.equal(elements.actualSizeMascot.style.left, '450.5px');
+  assert.equal(elements.actualSizeMascot.style.top, '0px');
+  assert.equal(elements.actualSizeEffect.style.width, '240px');
+  assert.equal(elements.actualSizeEffect.style.left, '120px');
+  assert.equal(elements.actualSizeEffect.style.top, '839px');
   click(elements.actualSizeClose);
 });
 

@@ -313,7 +313,10 @@ test('speed preview uses capped frame deltas, reflects at edges, and honors the 
     for (let frame = 1; frame <= 6; frame += 1) scheduler.frame(frame * 50);
 
     assert.equal(settings.api.movementPreviewState().position, 90);
-    assert.equal(settings.api.elements.movementSpeedPreviewImage.style.left, '98px');
+    assert.equal(
+      settings.api.elements.movementSpeedPreviewWrapper.style.transform,
+      'translate3d(90px, -50%, 0)',
+    );
     assert.equal(scheduler.pending.size, 1);
 
     const bounceScheduler = makeAnimationScheduler();

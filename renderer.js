@@ -9,6 +9,13 @@ const DEFAULT_DURATION_MS = window.DesktopMascotConfigRules.DEFAULT_DURATION_MS;
 const MAX_IMAGE_PIXELS = window.DesktopMascotConfigRules.MAX_IMAGE_PIXELS;
 const mapWithConcurrency = window.DesktopMascotConcurrency.mapWithConcurrency;
 const failedActionIds = new Set();
+let animationFrameId = null;
+let workTimerId = null;
+let workTimerDeadline = null;
+let renderedMascotSize = null;
+let renderedPosition = null;
+let renderedFlip = null;
+let legacyPositionStylesCleared = false;
 
 const state = {
   config: null,
@@ -99,8 +106,11 @@ function getMascotHeight() {
 
 function renderMascotSize() {
   const size = getMascotWidth();
-  mascotElement.style.width = `${size}px`;
-  mascotElement.style.height = `${size}px`;
+  if (renderedMascotSize === size) return;
+  const width = `${size}px`;
+  mascotElement.style.width = width;
+  mascotElement.style.height = width;
+  renderedMascotSize = size;
 }
 
 function configuredMargin() {
@@ -148,9 +158,21 @@ function clampPosition(x, y) {
 }
 
 function renderPosition() {
-  mascotElement.style.left = '';
-  mascotElement.style.top = '';
-  mascotElement.style.transform = `translate3d(${state.position.x}px, ${state.position.y}px, 0)`;
+  if (!legacyPositionStylesCleared) {
+    mascotElement.style.left = '';
+    mascotElement.style.top = '';
+    legacyPositionStylesCleared = true;
+  }
+  const { x, y } = state.position;
+  if (renderedPosition?.x === x && renderedPosition?.y === y) return;
+  mascotElement.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  renderedPosition = { x, y };
+}
+
+function invalidateMascotRenderCache() {
+  renderedMascotSize = null;
+  renderedPosition = null;
+  renderedFlip = null;
 }
 
 function savePosition() {
@@ -340,7 +362,10 @@ function applyFlip() {
   }
 
   state.directionalFlip = flip;
-  mascotImage.style.setProperty('--image-flip-x', String(flip));
+  if (renderedFlip !== flip) {
+    mascotImage.style.setProperty('--image-flip-x', String(flip));
+    renderedFlip = flip;
+  }
 }
 
 function orthogonalVelocity(speed) {
@@ -360,6 +385,7 @@ function launchVelocity(speed) {
 function setAction(action, now = performance.now()) {
   if (!action) return;
 
+  const wasAnimating = movementNeedsAnimation();
   state.currentAction = action;
   state.lastEffectAt = 0;
   state.nextActionAt = now + durationFor(action);
@@ -393,6 +419,8 @@ function setAction(action, now = performance.now()) {
   }
 
   applyFlip();
+  if (!wasAnimating && movementNeedsAnimation()) state.lastFrameAt = now;
+  scheduleWork();
 }
 
 function displayAction(action, now = performance.now(), timeoutMs = 6000) {
@@ -571,6 +599,7 @@ async function reloadConfig({
     state.config = config;
     state.actions = resolvedActions;
     state.unavailableActionNames = unavailableActionNames;
+    invalidateMascotRenderCache();
     renderMascotSize();
 
     const preserved = keepPosition && state.currentAction ? state.position : null;
@@ -688,15 +717,90 @@ function updateMotion(now, deltaSeconds) {
   setPosition(nextX, nextY, { emitEffect: true, now });
 }
 
-function animationFrame(now) {
+function movementNeedsAnimation() {
+  const movementType = state.currentAction?.movement?.type || 'still';
+  return !state.paused && !state.isDragging && Boolean(state.currentAction)
+    && movementType !== 'still';
+}
+
+function cancelScheduledWork() {
+  if (animationFrameId !== null) {
+    window.cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+  if (workTimerId !== null) {
+    window.clearTimeout(workTimerId);
+    workTimerId = null;
+    workTimerDeadline = null;
+  }
+}
+
+function nextWorkDeadline(now) {
+  const visibilityDeadline = state.lastVisibilityCheckAt + 1000;
+  const deadlines = [visibilityDeadline];
+  if (!movementNeedsAnimation() && !state.paused && !state.isDragging && state.currentAction) {
+    deadlines.push(state.nextActionAt);
+    const effect = state.currentAction.effect;
+    if ((state.currentAction.movement?.type || 'still') === 'still'
+      && effect?.emitWhileStill && effect.assetUrl) {
+      deadlines.push(state.lastEffectAt + (Number(effect.intervalMs) || 450));
+    }
+  }
+  return Math.max(now, Math.min(...deadlines));
+}
+
+function runScheduledAnimation(now) {
+  animationFrameId = null;
+  if (document.hidden) {
+    cancelScheduledWork();
+    return;
+  }
   const deltaSeconds = Math.min(0.05, Math.max(0, (now - state.lastFrameAt) / 1000));
   state.lastFrameAt = now;
+  const checkVisibility = now - state.lastVisibilityCheckAt >= 1000;
+  if (checkVisibility) state.lastVisibilityCheckAt = now;
   updateMotion(now, deltaSeconds);
+  if (checkVisibility) ensureMascotVisible();
+  scheduleWork();
+}
+
+function runScheduledTimer() {
+  workTimerId = null;
+  workTimerDeadline = null;
+  if (document.hidden) {
+    cancelScheduledWork();
+    return;
+  }
+  const now = performance.now();
   if (now - state.lastVisibilityCheckAt >= 1000) {
     state.lastVisibilityCheckAt = now;
     ensureMascotVisible();
   }
-  requestAnimationFrame(animationFrame);
+  if (!movementNeedsAnimation()) updateMotion(now, 0);
+  scheduleWork();
+}
+
+function scheduleWork() {
+  if (document.hidden) {
+    cancelScheduledWork();
+    return;
+  }
+  const now = performance.now();
+  if (movementNeedsAnimation()) {
+    if (animationFrameId === null) {
+      animationFrameId = window.requestAnimationFrame(runScheduledAnimation);
+    }
+  } else if (animationFrameId !== null) {
+    window.cancelAnimationFrame(animationFrameId);
+    animationFrameId = null;
+  }
+
+  const deadline = nextWorkDeadline(now);
+  if (workTimerId !== null && workTimerDeadline === deadline) return;
+  if (workTimerId !== null) window.clearTimeout(workTimerId);
+  workTimerDeadline = deadline;
+  workTimerId = window.setTimeout(runScheduledTimer, Math.max(0, deadline - now));
+  workTimerId?.unref?.();
 }
 
 mascotElement.addEventListener('pointerdown', (event) => {
@@ -704,6 +808,7 @@ mascotElement.addEventListener('pointerdown', (event) => {
   event.preventDefault();
   state.pointerPosition = { x: event.clientX, y: event.clientY };
   state.isDragging = true;
+  cancelScheduledWork();
   state.dragPointerId = event.pointerId;
   state.dragOffset = {
     x: event.clientX - state.position.x,
@@ -712,6 +817,7 @@ mascotElement.addEventListener('pointerdown', (event) => {
   mascotElement.classList.add('is-dragging');
   mascotElement.setPointerCapture(event.pointerId);
   setMousePassthrough(false);
+  scheduleWork();
 });
 
 window.addEventListener('pointermove', (event) => {
@@ -748,6 +854,8 @@ function finishDrag(event) {
   const x = event?.clientX ?? -1;
   const y = event?.clientY ?? -1;
   setMousePassthrough(!pointIsInsideMascot(x, y));
+  state.lastFrameAt = performance.now();
+  scheduleWork();
 }
 
 window.addEventListener('pointerup', finishDrag);
@@ -759,14 +867,27 @@ document.documentElement.addEventListener('mouseleave', () => {
   }
 });
 window.addEventListener('resize', () => {
-  window.requestAnimationFrame(() => ensureMascotVisible({ save: true }));
+  ensureMascotVisible({ save: true });
+  scheduleWork();
 });
-window.addEventListener('pageshow', () => ensureMascotVisible({ save: true }));
+window.addEventListener('pageshow', () => {
+  ensureMascotVisible({ save: true });
+  scheduleWork();
+});
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden) clearEffects();
-  else ensureMascotVisible({ save: true });
+  if (document.hidden) {
+    cancelScheduledWork();
+    clearEffects();
+  } else {
+    const now = performance.now();
+    state.lastFrameAt = now;
+    state.lastVisibilityCheckAt = now;
+    ensureMascotVisible({ save: true });
+    scheduleWork();
+  }
 });
 window.addEventListener('beforeunload', () => {
+  cancelScheduledWork();
   clearEffects();
   savePosition();
 });
@@ -786,6 +907,7 @@ function handleMascotImageError() {
   const nextAction = chooseWeightedAction();
   if (nextAction) setAction(nextAction);
   else state.nextActionAt = performance.now() + 1000;
+  scheduleWork();
 }
 
 mascotImage.addEventListener('load', () => {
@@ -809,7 +931,9 @@ window.mascotAPI.onCommand(async ({ command, value }) => {
     if (state.paused) clearEffects();
     if (!state.paused && state.currentAction) {
       state.nextActionAt = performance.now() + durationFor(state.currentAction);
+      state.lastFrameAt = performance.now();
     }
+    scheduleWork();
   }
   if (command === 'center') {
     setPosition(
@@ -817,9 +941,11 @@ window.mascotAPI.onCommand(async ({ command, value }) => {
       (window.innerHeight - getMascotHeight()) / 2,
     );
     savePosition();
+    scheduleWork();
   }
   if (command === 'ensure-visible') {
     ensureMascotVisible({ save: true });
+    scheduleWork();
   }
   if (command === 'sync-pointer-position') {
     const x = Number(value?.x);
@@ -853,5 +979,6 @@ window.addEventListener(
 );
 
 reloadConfig({ keepPosition: false }).then(() => {
-  requestAnimationFrame(animationFrame);
+  state.lastFrameAt = performance.now();
+  scheduleWork();
 });

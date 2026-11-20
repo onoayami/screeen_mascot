@@ -24,6 +24,10 @@ export function loadMainForTest({
   dialogOverrides = {},
   nativeImageOverrides = {},
   timerOverrides = {},
+  platform = process.platform,
+  resourcesPath = path.join(projectRoot, '.phase0-resources'),
+  executablePath = path.join(projectRoot, 'test-app.app', 'Contents', 'MacOS', 'Desktop Mascot'),
+  execFileSyncOverride,
 } = {}) {
   const handlers = new Map();
   const ipcListeners = new Map();
@@ -278,6 +282,7 @@ export function loadMainForTest({
     },
     dialog: {
       async showOpenDialog() { return { canceled: true, filePaths: [] }; },
+      async showSaveDialog() { return { canceled: true, filePath: undefined }; },
       async showMessageBox() { return { response: 0 }; },
       showErrorBox(...args) { errorBoxes.push(args); },
       ...dialogOverrides,
@@ -289,7 +294,7 @@ export function loadMainForTest({
 
   const context = {
     console,
-    process,
+    process: { ...process, platform, resourcesPath, execPath: executablePath },
     Buffer,
     URL,
     Promise,
@@ -301,6 +306,12 @@ export function loadMainForTest({
     require(id) {
       if (id === 'electron') return electron;
       if (id === 'fs') return wrappedFs;
+      if (id === 'child_process') {
+        return {
+          ...hostRequire(id),
+          execFileSync: execFileSyncOverride || (() => 'com.github.onoayami.desktopmascot\n'),
+        };
+      }
       if (id.startsWith('./') || id.startsWith('../')) return projectRequire(id);
       return hostRequire(id);
     },
@@ -331,6 +342,10 @@ export function loadMainForTest({
     getCharacterAssetMetadata: typeof getCharacterAssetMetadata === 'function' ? getCharacterAssetMetadata : undefined,
     importImageFromPath,
     discardImportedImage: typeof discardImportedImage === 'function' ? discardImportedImage : undefined,
+    duplicateActionAssets: typeof duplicateActionAssets === 'function' ? duplicateActionAssets : undefined,
+    cleanupSessionDuplicatedImages: typeof cleanupSessionDuplicatedImages === 'function'
+      ? cleanupSessionDuplicatedImages
+      : undefined,
     publishImageTemporary: typeof publishImageTemporary === 'function' ? publishImageTemporary : undefined,
     uniqueDestination: typeof uniqueDestination === 'function' ? uniqueDestination : undefined,
     saveTransparentPng,
@@ -434,6 +449,10 @@ export function loadRendererForTest({
   width = 800,
   height = 600,
   random = Math.random,
+  now = () => 0,
+  requestAnimationFrame = () => null,
+  cancelAnimationFrame = () => {},
+  timerOverrides = {},
   localStorage: localStorageOverride,
   mascotAPI: mascotAPIOverride = {},
   ImageClass = class {},
@@ -441,16 +460,18 @@ export function loadRendererForTest({
   const { document, nodes } = createDomStub();
   const projectRequire = createRequire(path.join(projectRoot, 'main.js'));
   const passthroughCalls = [];
+  let commandHandler = null;
   const storage = localStorageOverride || { getItem: () => null, setItem() {} };
   const windowObject = createWindowEventTarget({
     innerWidth: width,
     innerHeight: height,
-    requestAnimationFrame() {},
-    setTimeout,
-    clearTimeout,
+    requestAnimationFrame,
+    cancelAnimationFrame,
+    setTimeout: timerOverrides.setTimeout || setTimeout,
+    clearTimeout: timerOverrides.clearTimeout || clearTimeout,
     mascotAPI: {
       setMousePassthrough(value) { passthroughCalls.push(value); },
-      onCommand() {},
+      onCommand(handler) { commandHandler = handler; },
       reportDiagnostic() {},
       loadConfig: async () => ({ config: { mascot: {}, actions: [] } }),
       resolveAsset: async () => null,
@@ -467,10 +488,11 @@ export function loadRendererForTest({
     document,
     window: windowObject,
     localStorage: storage,
-    performance: { now: () => 0 },
-    requestAnimationFrame() {},
-    setTimeout,
-    clearTimeout,
+    performance: { now },
+    requestAnimationFrame,
+    cancelAnimationFrame,
+    setTimeout: timerOverrides.setTimeout || setTimeout,
+    clearTimeout: timerOverrides.clearTimeout || clearTimeout,
     Image: ImageClass,
     Math: vmMath,
   };
@@ -489,6 +511,10 @@ export function loadRendererForTest({
     clampPosition,
     ensureMascotVisible,
     renderPosition: typeof renderPosition === 'function' ? renderPosition : undefined,
+    renderMascotSize: typeof renderMascotSize === 'function' ? renderMascotSize : undefined,
+    invalidateMascotRenderCache: typeof invalidateMascotRenderCache === 'function'
+      ? invalidateMascotRenderCache
+      : undefined,
     configuredStartPosition,
     setMousePassthrough,
     applyFlip,
@@ -503,6 +529,11 @@ export function loadRendererForTest({
     clearEffects: typeof clearEffects === 'function' ? clearEffects : undefined,
     reloadConfig,
     updateMotion,
+    scheduleWork: typeof scheduleWork === 'function' ? scheduleWork : undefined,
+    cancelScheduledWork: typeof cancelScheduledWork === 'function' ? cancelScheduledWork : undefined,
+    runScheduledTimer: typeof runScheduledTimer === 'function' ? runScheduledTimer : undefined,
+    runScheduledAnimation: typeof runScheduledAnimation === 'function' ? runScheduledAnimation : undefined,
+    movementNeedsAnimation: typeof movementNeedsAnimation === 'function' ? movementNeedsAnimation : undefined,
     failedActionIds,
     resolveAction: typeof resolveAction === 'function' ? resolveAction : undefined,
   };`;
@@ -515,7 +546,15 @@ export function loadRendererForTest({
     const { x, y } = api.state.position;
     return { left: x, top: y, width: mascotWidth, height: mascotHeight, right: x + mascotWidth, bottom: y + mascotHeight };
   };
-  return { api, nodes, window: windowObject, passthroughCalls, localStorage: storage, context };
+  return {
+    api,
+    nodes,
+    window: windowObject,
+    passthroughCalls,
+    localStorage: storage,
+    context,
+    dispatchCommand: (...args) => commandHandler?.(...args),
+  };
 }
 
 export function loadSettingsForTest({
@@ -545,13 +584,29 @@ export function loadSettingsForTest({
   };
   const mascotAPI = {
     loadConfig: async () => ({ config: structuredClone(defaultConfig) }),
+    getLoginItemSettings: async () => ({
+      supported: true,
+      enabled: false,
+      requiresApproval: false,
+      notFound: false,
+      status: 'not-registered',
+    }),
+    setLoginItemSettings: async (openAtLogin) => ({
+      supported: true,
+      enabled: openAtLogin,
+      requiresApproval: false,
+      notFound: false,
+      status: openAtLogin ? 'enabled' : 'not-registered',
+    }),
     resolveAsset: async (relativePath) => `file://${relativePath}`,
     chooseImage: async () => null,
     importImage: async () => null,
     discardImportedImage: async () => false,
+    duplicateActionAssets: async () => null,
     saveTransparentPng: async () => null,
     getPathForFile: () => '',
     saveConfig: async (config) => ({ ok: true, applied: true, config }),
+    exportDistribution: async () => ({ canceled: false, fileName: 'Desktop Mascot 配布版.zip' }),
     recoverConfig: async () => ({ ok: true }),
     reportDirtyState() {},
     getAssetMetadata: async () => null,
@@ -609,6 +664,8 @@ export function loadSettingsForTest({
     state,
     elements,
     loadConfiguration,
+    refreshLoginItemSettings,
+    setLoginAtStartup,
     recoverConfiguration,
     setBusy,
     markDirty,
@@ -616,7 +673,20 @@ export function loadSettingsForTest({
     markLoaded: typeof markLoaded === 'function' ? markLoaded : undefined,
     serializeConfig,
     saveConfiguration,
+    createDistribution,
     saveSelectedAction,
+    duplicateSelectedAction: typeof duplicateSelectedAction === 'function'
+      ? duplicateSelectedAction
+      : undefined,
+    deleteSelectedAction: typeof deleteSelectedAction === 'function'
+      ? deleteSelectedAction
+      : undefined,
+    applyImportedActionImage: typeof applyImportedActionImage === 'function'
+      ? applyImportedActionImage
+      : undefined,
+    applyImportedEffectImage: typeof applyImportedEffectImage === 'function'
+      ? applyImportedEffectImage
+      : undefined,
     isSelectedActionPending,
     applyDurationBulk,
     readBulkDuration: typeof readBulkDuration === 'function' ? readBulkDuration : undefined,
@@ -630,6 +700,7 @@ export function loadSettingsForTest({
       position: movementPreviewPosition,
       direction: movementPreviewDirection,
       actionId: movementPreviewActionId,
+      stageWidth: movementPreviewStageWidth,
     }),
     beginOperation: typeof beginOperation === 'function' ? beginOperation : undefined,
     endOperation: typeof endOperation === 'function' ? endOperation : undefined,
@@ -656,6 +727,10 @@ export function loadSettingsForTest({
       : undefined,
     renderEditor: typeof renderEditor === 'function' ? renderEditor : undefined,
     refreshPreviewGeometry: typeof refreshPreviewGeometry === 'function' ? refreshPreviewGeometry : undefined,
+    queuePreviewGeometry: typeof queuePreviewGeometry === 'function' ? queuePreviewGeometry : undefined,
+    renderPreviewScene: typeof renderPreviewScene === 'function' ? renderPreviewScene : undefined,
+    setImagePreview: typeof setImagePreview === 'function' ? setImagePreview : undefined,
+    updateActionCard: typeof updateActionCard === 'function' ? updateActionCard : undefined,
     previewFitRatio: typeof previewFitRatio === 'function' ? previewFitRatio : undefined,
     openImageEditor: typeof openImageEditor === 'function' ? openImageEditor : undefined,
     fitActionIntoFrame: typeof fitActionIntoFrame === 'function' ? fitActionIntoFrame : undefined,

@@ -7,6 +7,12 @@ contextBridge.exposeInMainWorld('mascotAPI', {
   recoverConfig(strategy) {
     return ipcRenderer.invoke('mascot:recover-config', strategy);
   },
+  getLoginItemSettings() {
+    return ipcRenderer.invoke('mascot:get-login-item-settings');
+  },
+  setLoginItemSettings(openAtLogin) {
+    return ipcRenderer.invoke('mascot:set-login-item-settings', openAtLogin);
+  },
   reportDirtyState(dirty) {
     ipcRenderer.send('mascot:settings-dirty', Boolean(dirty));
   },
@@ -16,8 +22,16 @@ contextBridge.exposeInMainWorld('mascotAPI', {
   getAssetMetadata(relativePath) {
     return ipcRenderer.invoke('mascot:get-asset-metadata', relativePath);
   },
-  discardImportedImage(relativePath, category) {
-    return ipcRenderer.invoke('mascot:discard-imported-image', relativePath, category);
+  discardImportedImage(relativePath, category, protectedRelativePaths = []) {
+    return ipcRenderer.invoke(
+      'mascot:discard-imported-image',
+      relativePath,
+      category,
+      protectedRelativePaths,
+    );
+  },
+  duplicateActionAssets(mainPath, effectPath = null) {
+    return ipcRenderer.invoke('mascot:duplicate-action-assets', { mainPath, effectPath });
   },
   chooseImage(category) {
     return ipcRenderer.invoke('mascot:choose-image', category);
@@ -44,5 +58,8 @@ contextBridge.exposeInMainWorld('mascotAPI', {
   },
   saveConfig(config, previewActionIndex = null) {
     return ipcRenderer.invoke('mascot:save-config', { config, previewActionIndex });
+  },
+  exportDistribution() {
+    return ipcRenderer.invoke('mascot:export-distribution');
   },
 });

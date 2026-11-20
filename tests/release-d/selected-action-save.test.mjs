@@ -360,12 +360,19 @@ test('bulk save establishes a baseline that later selected saves preserve', asyn
   assert.equal(payloads[1].actions[0].name, '後から個別編集');
 });
 
-test('selected-save control is adjacent to delete and its label and trim font match the editor', () => {
+test('action toolbar ordering, responsive layout, and related editor labels are preserved', () => {
   const html = fs.readFileSync(path.join(PROJECT_ROOT, 'settings.html'), 'utf8');
   const styles = fs.readFileSync(path.join(PROJECT_ROOT, 'settings.css'), 'utf8');
-  assert.match(html, /class="editor-save-actions">\s*<button id="delete-action"[^>]*>削除<\/button>\s*<button id="save-selected-action"[^>]*>保存<\/button>\s*<\/div>/);
-  assert.match(styles, /\.editor-tools\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap;/);
-  assert.match(styles, /\.editor-save-actions\s*\{\s*display:\s*flex;\s*flex:\s*0 0 auto;\s*gap:\s*8px;\s*\}/);
+  assert.match(html, /class="editor-tools" aria-label="動作の並び替え・削除・複製・保存">\s*<div class="editor-save-actions">\s*<button id="move-up"[^>]*>↑ 上へ<\/button>\s*<button id="move-down"[^>]*>↓ 下へ<\/button>\s*<button id="delete-action"[^>]*>削除<\/button>\s*<button id="duplicate-action"[^>]*>複製<\/button>\s*<button id="save-selected-action"[^>]*>保存<\/button>\s*<\/div>/);
+  assert.match(styles, /\.editor-name-block\s*\{\s*min-width:\s*0;\s*flex:\s*1 1 160px;\s*\}/);
+  assert.match(styles, /\.editor-name-input\s*\{[^}]*min-width:\s*0;[^}]*max-width:\s*100%;/);
+  assert.match(styles, /\.editor-tools\s*\{\s*display:\s*flex;\s*flex:\s*0 0 auto;\s*flex-wrap:\s*nowrap;/);
+  assert.match(styles, /\.editor-tools button\s*\{\s*white-space:\s*nowrap;\s*\}/);
+  assert.match(styles, /\.editor-save-actions\s*\{\s*display:\s*flex;\s*flex:\s*0 0 auto;\s*gap:\s*6px;\s*\}/);
+  const smallScreenStyles = styles.match(/@media \(max-width: 680px\) \{([\s\S]*?)\n\}/);
+  assert.ok(smallScreenStyles);
+  assert.match(smallScreenStyles[1], /\.editor-tools \{ width: 100%; max-width: 100%; flex-wrap: wrap; justify-content: flex-start; \}/);
+  assert.match(smallScreenStyles[1], /\.editor-save-actions \{ max-width: 100%; flex-wrap: wrap; \}/);
   assert.match(html, /頻度（選ばれやすさ）/);
   assert.match(styles, /\.image-edit-button\s*\{[^}]*font-size:\s*13px/);
   assert.match(styles, /\.field(?:,\s*\.image-flip-control)?\s*\{[^}]*font-size:\s*13px/);

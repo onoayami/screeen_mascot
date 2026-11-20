@@ -168,7 +168,10 @@ test('A2-10: settings preload exposes no mascot-only capabilities', async () => 
     assert.deepEqual(Object.keys(preload.api).sort(), [
       'chooseImage',
       'discardImportedImage',
+      'duplicateActionAssets',
+      'exportDistribution',
       'getAssetMetadata',
+      'getLoginItemSettings',
       'getPathForFile',
       'importImage',
       'loadConfig',
@@ -177,13 +180,16 @@ test('A2-10: settings preload exposes no mascot-only capabilities', async () => 
       'resolveAsset',
       'saveConfig',
       'saveTransparentPng',
+      'setLoginItemSettings',
     ]);
     await preload.api.getPathForFile({});
     assert.equal(preload.invoked.at(-1).channel, 'mascot:register-dropped-path');
+    await preload.api.exportDistribution();
+    assert.equal(preload.invoked.at(-1).channel, 'mascot:export-distribution');
   });
 });
 
-test('retired distribution preparation is absent from the UI, preload, and IPC', async () => {
+test('obsolete distribution-defaults preparation stays absent while ZIP export is available', async () => {
   await withTemporaryProject(async ({ projectRoot, userDataRoot }) => {
     const main = loadMainForTest({ projectRoot, userDataRoot });
     const preload = loadPreloadForTest({ projectRoot });
@@ -191,10 +197,13 @@ test('retired distribution preparation is absent from the UI, preload, and IPC',
     const settings = fs.readFileSync(path.join(projectRoot, 'settings.js'), 'utf8');
 
     assert.equal(main.handlers.has('mascot:prepare-distribution-defaults'), false);
+    assert.equal(main.handlers.has('mascot:export-distribution'), true);
     assert.equal(main.handlers.has('mascot:get-app-info'), false);
     assert.equal(Object.hasOwn(preload.api, 'prepareDistributionDefaults'), false);
+    assert.equal(Object.hasOwn(preload.api, 'exportDistribution'), true);
     assert.equal(Object.hasOwn(preload.api, 'getAppInfo'), false);
     assert.doesNotMatch(html, /prepare-release-button/);
+    assert.match(html, /id="distribution-button"/);
     assert.doesNotMatch(settings, /prepareDistributionDefaults|prepare-release-button|getAppInfo/);
   });
 });
@@ -283,7 +292,7 @@ test('A2-13: missing desktop API disables editing instead of installing a succes
     await new Promise((resolve) => setImmediate(resolve));
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(settings.window.mascotAPI, undefined);
-    for (const id of ['save-button', 'reload-button', 'add-action']) {
+    for (const id of ['save-button', 'distribution-button', 'add-action']) {
       assert.equal(settings.nodes.get(id)?.disabled, true, id);
     }
     assert.match(settings.nodes.get('feedback')?.textContent || '', /デスクトップアプリ|利用できません/);

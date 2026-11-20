@@ -34,6 +34,33 @@ test('global settings expose only mascot size and remembered position', async ()
   });
 });
 
+test('global checkbox rows use compact frequency-label typography without changing other check rows', () => {
+  const html = fs.readFileSync(new URL('../../settings.html', import.meta.url), 'utf8');
+  const css = fs.readFileSync(new URL('../../settings.css', import.meta.url), 'utf8');
+  const globalPanel = html.match(/<section class="panel global-panel"[\s\S]*?<\/section>/)?.[0];
+  assert.ok(globalPanel);
+  for (const id of ['remember-position', 'login-at-startup']) {
+    assert.match(globalPanel, new RegExp(`<label class="check-row">\\s*<input id="${id}"[\\s\\S]*?<span>[^<]+<\\/span>\\s*<\\/label>`));
+  }
+
+  const globalCheckRow = css.match(/\.global-panel > \.check-row\s*\{([^}]*)\}/)?.[1];
+  assert.ok(globalCheckRow);
+  assert.match(globalCheckRow, /min-height:\s*24px;/);
+  assert.match(globalCheckRow, /margin-top:\s*8px;/);
+  assert.match(globalCheckRow, /color:\s*#000;/);
+  assert.match(globalCheckRow, /font-size:\s*13px;/);
+  assert.match(globalCheckRow, /font-weight:\s*600;/);
+  assert.match(globalCheckRow, /line-height:\s*20px;/);
+  const sharedCheckRow = css.match(/\.check-row,\s*\.switch-row,\s*\.check-card\s*\{([^}]*)\}/)?.[1];
+  assert.ok(sharedCheckRow);
+  assert.match(sharedCheckRow, /min-height:\s*44px;/);
+  assert.match(sharedCheckRow, /font-size:\s*14px;/);
+  assert.match(css, /\.login-item-status\s*\{[^}]*margin:\s*2px 0 0 28px;[^}]*color:\s*var\(--text-secondary\);[^}]*font-size:\s*12px;/);
+  assert.match(css, /\.login-item-status\.is-error\s*\{[^}]*color:\s*#a33b2f;/);
+  assert.match(css, /\.check-row input,[\s\S]*?width:\s*18px;[\s\S]*?height:\s*18px;/);
+  assert.match(css, /@media \(prefers-color-scheme: dark\)\s*\{[\s\S]*?\.global-panel > \.check-row > span\s*\{\s*background-color:\s*#fff;/);
+});
+
 test('saving remaining global settings preserves the configured mascot name and start position', async () => {
   await withTemporaryProject(async ({ projectRoot }) => {
     const initialConfig = {

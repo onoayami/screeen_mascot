@@ -13,6 +13,7 @@ const {
 const fs = require('fs');
 const crypto = require('crypto');
 const path = require('path');
+const { execFileSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const {
   installDefaultsFromSource,
@@ -30,6 +31,13 @@ const {
   validateStandaloneImageFile,
 } = require('./shared/asset-validation');
 const { createImageDecodeValidator } = require('./shared/image-decode');
+const {
+  createDistributionArchive,
+  distributionIdFromBundleIdentifier,
+  distributionUserDataName,
+  readBundleIdentifier,
+  readDistributionDefaults,
+} = require('./shared/distribution');
 const {
   validateAndNormalizeConfig: validateConfigWithRules,
   validateAndNormalizeLoadedConfig: validateLoadedConfigWithRules,
@@ -60,6 +68,7 @@ let pendingRendererReadyNotification = null;
 let lastPointerSync = null;
 const POINTER_SYNC_HEARTBEAT_MS = 5000;
 const sessionImportedImagePaths = new Set();
+const sessionDuplicatedImagePaths = new Set();
 const droppedPathTokens = new Map();
 const DROPPED_PATH_TOKEN_TTL_MS = 60_000;
 const MAX_DROPPED_PATH_TOKENS = 50;
@@ -68,6 +77,7 @@ let diagnosticFlushTimer = null;
 let diagnosticWriteInProgress = false;
 let diagnosticWritePromise = Promise.resolve();
 let diagnosticQuitFlushPending = false;
+let distributionExportInProgress = false;
 let lastRendererReloadAt = -Infinity;
 let rendererReloadReason = '';
 let preparedCharacterDirectory = null;
@@ -90,7 +100,42 @@ const RENDERER_DIAGNOSTIC_TYPES = new Set([
   'image-load-failed',
 ]);
 
-let userDataDirectory = 'Desktop Mascot';
+const validateImageDecodes = createImageDecodeValidator({ nativeImage, fsModule: fs });
+let packagedDistribution = null;
+try {
+  if (app.isPackaged) {
+    packagedDistribution = readDistributionDefaults(process.resourcesPath, {
+      fsModule: fs,
+      validateConfig: (config) => {
+        const loaded = validateLoadedConfigWithRules(config);
+        if (loaded.warnings.length > 0) {
+          throw new Error('配布版設定に未対応の古い値があります。');
+        }
+        return loaded.config;
+      },
+      validateAsset: validateImageDecodes,
+    });
+    const bundleIdentifier = readBundleIdentifier(process.execPath, { execFileSync });
+    const bundleDistributionId = distributionIdFromBundleIdentifier(bundleIdentifier);
+    if (packagedDistribution && bundleDistributionId !== packagedDistribution.id) {
+      throw new Error('配布版のアプリ識別情報と初期設定のIDが一致しません。');
+    }
+    if (!packagedDistribution && bundleDistributionId) {
+      throw new Error('配布版の初期設定が見つかりません。アプリを作り直してください。');
+    }
+  }
+} catch (error) {
+  try {
+    dialog.showErrorBox('配布版を起動できません', String(error?.message || error));
+  } catch (notificationError) {
+    console.error('配布版の起動エラーを表示できませんでした。', notificationError);
+  }
+  throw error;
+}
+
+let userDataDirectory = packagedDistribution
+  ? distributionUserDataName(packagedDistribution.id)
+  : 'Desktop Mascot';
 try {
   userDataDirectory = path.join(app.getPath('appData'), userDataDirectory);
   fs.mkdirSync(userDataDirectory, { recursive: true });
@@ -106,6 +151,11 @@ app.on('before-quit', (event) => {
   quitRequested = true;
   if (activeQuitAttemptSequence === null) beginQuitAttempt('native');
   recordQuitDiagnostic('before-quit');
+  if (distributionExportInProgress) {
+    event.preventDefault();
+    recordQuitDiagnostic('quit-deferred-for-distribution-export');
+    return;
+  }
   if (
     settingsDirty
     && !allowSettingsClose
@@ -146,7 +196,6 @@ const LEGACY_DEFAULT_ASSET_SHA256 = Object.freeze({
 });
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
-const validateImageDecodes = createImageDecodeValidator({ nativeImage, fsModule: fs });
 
 function getCharacterDirectory() {
   return path.join(app.getPath('userData'), 'characters');
@@ -385,6 +434,7 @@ function confirmSettingsClose(promptWindow) {
     recordQuitDiagnostic('quit-confirmation-discarded', { decision: 'discard' });
     allowSettingsClose = true;
     settingsDirty = false;
+    cleanupSessionDuplicatedImages();
     promptWindow.close();
     if (quitRequested) requestAppQuit('discard-confirmed');
   }).catch((error) => {
@@ -417,6 +467,7 @@ function mascotWindowSnapshot() {
 }
 
 function getBundledCharacterDirectory() {
+  if (packagedDistribution) return packagedDistribution.root;
   return path.join(__dirname, 'characters', 'default');
 }
 
@@ -632,24 +683,191 @@ function collectConfigAssetReferences(config) {
   return [...new Set(references)];
 }
 
-function discardImportedImage(relativePath, category) {
+function normalizeProtectedAssetReferences(relativePaths) {
+  if (!Array.isArray(relativePaths) || relativePaths.length > 200) {
+    throw new Error('保護する画像パスが正しくありません。');
+  }
+  return new Set(relativePaths.map((relativePath) => {
+    const normalized = normalizeRelativeImagePath(relativePath);
+    if (!/^(actions|effects)\//.test(normalized)) {
+      throw new Error('画像の保存先が正しくありません。');
+    }
+    return normalized;
+  }));
+}
+
+function discardImportedImage(
+  relativePath,
+  category,
+  protectedRelativePaths = [],
+  savedConfig = null,
+) {
   if (!['actions', 'effects'].includes(category)) throw new Error('画像カテゴリが正しくありません。');
   const normalized = normalizeRelativeImagePath(relativePath);
-  if (!/\.jpe?g$/i.test(normalized)) return false;
   if (!normalized.startsWith(`${category}/`)) throw new Error('画像の保存先が正しくありません。');
   const characterRoot = getCharacterDirectory();
-  const imagePath = resolveImageFileWithinRoot(characterRoot, normalized, { fsModule: fs });
-  if (!isLexicallyInsideRoot(path.join(characterRoot, category), imagePath)) {
+  const absolutePath = path.resolve(characterRoot, ...normalized.split('/'));
+  if (!isLexicallyInsideRoot(path.join(characterRoot, category), absolutePath)) {
     throw new Error('画像の保存先が正しくありません。');
   }
-  const absolutePath = path.resolve(imagePath);
-  if (!sessionImportedImagePaths.has(absolutePath)) return false;
-  const editable = loadEditableConfig();
+  const isDuplicatedCopy = sessionDuplicatedImagePaths.has(absolutePath);
+  const isImportedJpeg = /\.jpe?g$/i.test(normalized)
+    && sessionImportedImagePaths.has(absolutePath);
+  if (!isImportedJpeg && !isDuplicatedCopy) return false;
+  resolveImageFileWithinRoot(characterRoot, normalized, { fsModule: fs });
+  const editable = savedConfig || loadEditableConfig();
   if (!editable?.config) return false;
-  if (collectConfigAssetReferences(editable.config).includes(normalized)) return false;
+  const protectedReferences = normalizeProtectedAssetReferences(protectedRelativePaths);
+  if (
+    collectConfigAssetReferences(editable.config).includes(normalized)
+    || protectedReferences.has(normalized)
+  ) return false;
   fs.unlinkSync(absolutePath);
   sessionImportedImagePaths.delete(absolutePath);
+  sessionDuplicatedImagePaths.delete(absolutePath);
   return true;
+}
+
+function reportDuplicateImageCleanupFailure(message, reason) {
+  try {
+    console.warn(message, reason);
+  } catch (_error) {}
+  try {
+    recordDiagnostic('duplicate-image-cleanup-skipped', { reason });
+  } catch (_error) {}
+}
+
+function cleanupSessionDuplicatedImages() {
+  if (sessionDuplicatedImagePaths.size === 0) return 0;
+  let removed = 0;
+  try {
+    const editable = loadEditableConfig();
+    if (!editable?.config) {
+      reportDuplicateImageCleanupFailure(
+        '設定を確認できないため、複製画像を削除せずに残しました。',
+        'saved-config-unavailable',
+      );
+      return 0;
+    }
+    const savedReferences = new Set(collectConfigAssetReferences(editable.config));
+    for (const absolutePath of [...sessionDuplicatedImagePaths]) {
+      const relativePath = path.relative(getCharacterDirectory(), absolutePath)
+        .split(path.sep)
+        .join('/');
+      if (savedReferences.has(relativePath)) continue;
+      const category = relativePath.startsWith('actions/')
+        ? 'actions'
+        : relativePath.startsWith('effects/')
+          ? 'effects'
+          : null;
+      if (!category) continue;
+      try {
+        if (discardImportedImage(relativePath, category, [], editable)) removed += 1;
+      } catch (error) {
+        reportDuplicateImageCleanupFailure(
+          '未使用の複製画像を整理できませんでした。',
+          String(error?.message || error),
+        );
+      }
+    }
+  } catch (error) {
+    reportDuplicateImageCleanupFailure(
+      '複製画像を安全に整理できませんでした。ファイルは削除せずに残しました。',
+      String(error?.message || error),
+    );
+    return 0;
+  }
+  return removed;
+}
+
+function duplicateActionAssets({ mainPath, effectPath = null } = {}) {
+  if (typeof mainPath !== 'string' || (effectPath !== null && typeof effectPath !== 'string')) {
+    throw new Error('複製する画像パスが正しくありません。');
+  }
+  const sources = [
+    { relativePath: normalizeRelativeImagePath(mainPath), category: 'actions' },
+    ...(effectPath === null ? [] : [{
+      relativePath: normalizeRelativeImagePath(effectPath),
+      category: 'effects',
+    }]),
+  ];
+  for (const source of sources) {
+    if (!source.relativePath.startsWith(`${source.category}/`)) {
+      throw new Error('画像の保存先が正しくありません。');
+    }
+  }
+
+  const characterRoot = getCharacterDirectory();
+  const validatedSources = sources.map((source) => ({
+    ...source,
+    absolutePath: resolveImageFileWithinRoot(characterRoot, source.relativePath, {
+      fsModule: fs,
+      validateAsset: validateImageDecodes,
+    }),
+  }));
+  const destinations = [];
+  const temporaries = [];
+  try {
+    const categoryDirectories = new Map();
+    for (const source of validatedSources) {
+      if (!categoryDirectories.has(source.category)) {
+        categoryDirectories.set(
+          source.category,
+          ensureAssetCategoryDirectory(source.category).destinationDirectory,
+        );
+      }
+    }
+    for (const source of validatedSources) {
+      const directory = categoryDirectories.get(source.category);
+      const parsed = path.parse(source.relativePath);
+      const baseName = `${parsed.name}-copy${parsed.ext}`
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-');
+      const intendedPath = uniqueDestination(directory, baseName);
+      const temporary = temporaryImagePath(intendedPath, 'duplicate');
+      temporaries.push(temporary);
+      copyValidatedImageFile({
+        sourceFile: source.absolutePath,
+        destinationFile: temporary,
+        fsModule: fs,
+        validateAsset: validateImageDecodes,
+      });
+      const published = publishImageTemporary(temporary, directory, baseName);
+      destinations.push({
+        relativePath: path.relative(characterRoot, published).split(path.sep).join('/'),
+        assetUrl: pathToFileURL(published).href,
+      });
+    }
+    for (const destination of destinations) {
+      sessionDuplicatedImagePaths.add(path.resolve(characterRoot, destination.relativePath));
+    }
+    return {
+      main: destinations[0],
+      effect: destinations[1] || null,
+    };
+  } catch (error) {
+    const cleanupErrors = [];
+    for (const temporary of temporaries) {
+      try {
+        fs.rmSync(temporary, { force: true });
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    for (const destination of destinations) {
+      try {
+        fs.rmSync(path.join(characterRoot, destination.relativePath), { force: true });
+      } catch (cleanupError) {
+        cleanupErrors.push(cleanupError);
+      }
+    }
+    if (cleanupErrors.length > 0) {
+      throw new AggregateError(
+        [error, ...cleanupErrors],
+        '画像の複製または一時ファイルの整理に失敗しました。',
+      );
+    }
+    throw error;
+  }
 }
 
 function writeConfigAtomic(config, { backupCurrent = true } = {}) {
@@ -668,6 +886,11 @@ function writeConfigAtomic(config, { backupCurrent = true } = {}) {
     }
   }
   writeJsonAtomic(destination, config);
+  const savedReferences = new Set(collectConfigAssetReferences(config));
+  for (const absolutePath of [...sessionDuplicatedImagePaths]) {
+    const relativePath = path.relative(getCharacterDirectory(), absolutePath).split(path.sep).join('/');
+    if (savedReferences.has(relativePath)) sessionDuplicatedImagePaths.delete(absolutePath);
+  }
   return destination;
 }
 
@@ -1547,6 +1770,14 @@ function openSettingsWindow() {
   configureWindowSecurity(settingsWindow, 'settings.html');
   loadWindowFileWithRecovery(settingsWindow, 'settings.html', '設定画面');
   settingsWindow.on('close', (event) => {
+    if (distributionExportInProgress) {
+      event.preventDefault();
+      recordQuitDiagnostic('settings-close', {
+        decision: 'veto',
+        reason: 'distribution-export-in-progress',
+      });
+      return;
+    }
     const shouldPreventClose = settingsDirty && !allowSettingsClose;
     if (shouldPreventClose) event.preventDefault();
     recordQuitDiagnostic('settings-close', {
@@ -1579,6 +1810,7 @@ function openSettingsWindow() {
   settingsWindow.on('hide', () => restoreFloatingWhenUnavailable('hidden'));
   settingsWindow.webContents.on('destroyed', () => restoreFloatingWhenUnavailable('destroyed'));
   settingsWindow.on('closed', () => {
+    cleanupSessionDuplicatedImages();
     recordQuitDiagnostic('settings-window-closed', {
       currentWindow: settingsWindow === currentSettingsWindow,
     });
@@ -1785,6 +2017,15 @@ ipcMain.on('mascot:diagnostic', (event, diagnosticType) => {
 
 registerIpcHandler('mascot:load-config', 'application', () => loadMascotRuntimeConfig());
 registerIpcHandler('mascot:load-editable-config', 'settings', () => loadEditableConfig());
+registerIpcHandler('mascot:get-login-item-settings', 'settings', () => getLoginItemStatus());
+registerIpcHandler('mascot:set-login-item-settings', 'settings', (_event, openAtLogin) => {
+  if (typeof openAtLogin !== 'boolean') {
+    throw new TypeError('ログイン時の自動起動には真偽値を指定してください。');
+  }
+  if (!isLoginItemSettingsSupported()) return getLoginItemStatus();
+  app.setLoginItemSettings({ openAtLogin });
+  return getLoginItemStatus();
+});
 registerIpcHandler('mascot:recover-config', 'settings', (_event, strategy) => {
   return recoverEditableConfig(strategy);
 });
@@ -1817,8 +2058,17 @@ registerIpcHandler('mascot:import-image', 'settings', (_event, { sourcePath, cat
   return importImageFromPath(consumeDroppedPath(sourcePath), category);
 });
 
-registerIpcHandler('mascot:discard-imported-image', 'settings', (_event, relativePath, category) => {
-  return discardImportedImage(relativePath, category);
+registerIpcHandler('mascot:discard-imported-image', 'settings', (
+  _event,
+  relativePath,
+  category,
+  protectedRelativePaths,
+) => {
+  return discardImportedImage(relativePath, category, protectedRelativePaths);
+});
+
+registerIpcHandler('mascot:duplicate-action-assets', 'settings', (_event, payload) => {
+  return duplicateActionAssets(payload);
 });
 
 registerIpcHandler('mascot:save-transparent-png', 'settings', (_event, payload) => {
@@ -1852,6 +2102,72 @@ registerIpcHandler('mascot:save-config', 'settings', async (_event, payload) => 
     config,
   };
 });
+
+registerIpcHandler('mascot:export-distribution', 'settings', async () => {
+  if (process.platform !== 'darwin' || !app.isPackaged) {
+    throw new Error('配布版作成はmacOSにインストールしたアプリから利用できます。');
+  }
+  if (distributionExportInProgress) {
+    throw new Error('配布版を作成中です。完了してからもう一度お試しください。');
+  }
+
+  distributionExportInProgress = true;
+  try {
+    const result = await createDistributionArchive({
+      dialog,
+      parentWindow: settingsWindow || mascotWindow,
+      executablePath: process.execPath,
+      appIsPackaged: app.isPackaged,
+      userDataPath: app.getPath('userData'),
+      loadExportData: () => {
+        const loaded = loadNormalizedConfig({ persistMigration: false });
+        return {
+          config: loaded.config,
+          characterRoot: loaded.characterDirectory,
+        };
+      },
+      validateAsset: validateImageDecodes,
+    });
+    return result.canceled
+      ? { canceled: true }
+      : { canceled: false, fileName: path.basename(result.filePath) };
+  } catch (error) {
+    recordDiagnostic('distribution-export-failed');
+    throw error;
+  } finally {
+    distributionExportInProgress = false;
+    if (quitRequested && activeQuitAttemptSequence !== null) app.quit();
+  }
+});
+
+function isLoginItemSettingsSupported() {
+  return process.platform === 'darwin' && app.isPackaged;
+}
+
+function getLoginItemStatus() {
+  if (!isLoginItemSettingsSupported()) {
+    return {
+      supported: false,
+      enabled: false,
+      requiresApproval: false,
+      notFound: false,
+      status: 'unsupported',
+    };
+  }
+
+  const loginSettings = app.getLoginItemSettings();
+  const status = loginSettings.status;
+  if (!['not-registered', 'enabled', 'requires-approval', 'not-found'].includes(status)) {
+    throw new Error('macOSからログイン項目の状態を取得できませんでした。');
+  }
+  return {
+    supported: true,
+    enabled: status === 'enabled',
+    requiresApproval: status === 'requires-approval',
+    notFound: status === 'not-found',
+    status,
+  };
+}
 
 function startApplication() {
   if (process.platform !== 'darwin') {

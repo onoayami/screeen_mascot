@@ -1,15 +1,19 @@
 const REQUIRED_MASCOT_API_METHODS = Object.freeze([
   'loadConfig',
   'recoverConfig',
+  'getLoginItemSettings',
+  'setLoginItemSettings',
   'reportDirtyState',
   'resolveAsset',
   'getAssetMetadata',
   'discardImportedImage',
+  'duplicateActionAssets',
   'chooseImage',
   'importImage',
   'saveTransparentPng',
   'getPathForFile',
   'saveConfig',
+  'exportDistribution',
 ]);
 
 const sharedRules = window.DesktopMascotConfigRules;
@@ -42,6 +46,8 @@ const elements = {
   mascotSize: document.getElementById('mascot-size'),
   mascotSizeOutput: document.getElementById('mascot-size-output'),
   rememberPosition: document.getElementById('remember-position'),
+  loginAtStartup: document.getElementById('login-at-startup'),
+  loginAtStartupStatus: document.getElementById('login-at-startup-status'),
   addAction: document.getElementById('add-action'),
   actionList: document.getElementById('action-list'),
   openSizeManager: document.getElementById('open-size-manager'),
@@ -55,6 +61,7 @@ const elements = {
   moveUp: document.getElementById('move-up'),
   moveDown: document.getElementById('move-down'),
   deleteAction: document.getElementById('delete-action'),
+  duplicateAction: document.getElementById('duplicate-action'),
   saveSelectedAction: document.getElementById('save-selected-action'),
   actionDropzone: document.getElementById('action-dropzone'),
   imageControlStack: document.getElementById('image-control-stack'),
@@ -74,6 +81,7 @@ const elements = {
   speedOutput: document.getElementById('speed-output'),
   movementSpeedPreview: document.getElementById('movement-speed-preview'),
   movementSpeedPreviewStage: document.getElementById('movement-speed-preview-stage'),
+  movementSpeedPreviewWrapper: document.getElementById('movement-speed-preview-wrapper'),
   movementSpeedPreviewImage: document.getElementById('movement-speed-preview-image'),
   movementSpeedPreviewNote: document.getElementById('movement-speed-preview-note'),
   movementSpeedPreviewStop: document.getElementById('movement-speed-preview-stop'),
@@ -94,7 +102,8 @@ const elements = {
   effectOffsetX: document.getElementById('effect-offset-x'),
   effectOffsetY: document.getElementById('effect-offset-y'),
   effectWhileStill: document.getElementById('effect-while-still'),
-  reloadButton: document.getElementById('reload-button'),
+  distributionButton: document.getElementById('distribution-button'),
+  workspace: document.getElementById('workspace'),
   headerSaveButton: document.getElementById('save-button-header'),
   saveButton: document.getElementById('save-button'),
   imageEditorDialog: document.getElementById('image-editor-dialog'),
@@ -184,12 +193,19 @@ const state = {
   dirty: false,
   applyRetry: false,
   busy: false,
+  lockEdits: false,
   revision: 0,
   operationCounter: 0,
   activeOperation: null,
   sizeManagerGeneration: 0,
   jpegGeneration: 0,
   activeJpegCancel: null,
+  loginItemKnown: false,
+  loginItemSupported: false,
+  loginItemEnabled: false,
+  loginItemWriting: false,
+  loginItemGeneration: 0,
+  loginItemRefreshPromise: null,
 };
 const actionCardViews = new Map();
 let lastRenderedEditorActionId = null;
@@ -206,6 +222,11 @@ let movementPreviewLastTimestamp = null;
 let movementPreviewPosition = 0;
 let movementPreviewDirection = 1;
 let movementPreviewActionId = null;
+let movementPreviewStageWidth = 0;
+let movementPreviewStageObserver = null;
+let previewResizeObserver = null;
+let previewGeometryFrame = null;
+let allowFailedPreviewRetry = true;
 let durationBulkRevision = 0;
 
 function beginSizeManagerGeneration() {
@@ -444,6 +465,45 @@ function movementPreviewImageTransform(action, direction) {
   return { ...base, flipX: base.flipX !== directionFlip };
 }
 
+function updateMovementPreviewStageWidth() {
+  movementPreviewStageWidth = elements.movementSpeedPreviewStage.getBoundingClientRect().width;
+  if (movementPreviewRunning && !(movementPreviewStageWidth - 16 - 76 > 0)) {
+    showMovementSpeedPreviewStatus('プレビュー欄に移動できる幅がありません。');
+  }
+}
+
+function handleMovementPreviewVisibility() {
+  if (document.hidden) stopMovementSpeedPreview();
+  else updateMovementPreviewStageWidth();
+}
+
+function handlePreviewResize() {
+  updateMovementPreviewStageWidth();
+  refreshPreviewGeometry();
+}
+
+function handlePreviewImageLoad(image) {
+  image.dataset.previewErrorSource = '';
+  refreshPreviewGeometry();
+}
+
+function handlePreviewImageError(image) {
+  const failedSource = image.dataset.previewSource;
+  if (failedSource) image.dataset.previewErrorSource = failedSource;
+  refreshPreviewGeometry();
+}
+
+function cleanupPreviewScheduling() {
+  if (previewGeometryFrame !== null) {
+    cancelAnimationFrame(previewGeometryFrame);
+    previewGeometryFrame = null;
+  }
+  window.removeEventListener('resize', handlePreviewResize);
+  document.removeEventListener('visibilitychange', handleMovementPreviewVisibility);
+  previewResizeObserver?.disconnect();
+  movementPreviewStageObserver?.disconnect();
+}
+
 function animateMovementSpeedPreview(timestamp) {
   movementPreviewFrame = null;
   if (!movementPreviewRunning || document.hidden) {
@@ -455,8 +515,7 @@ function animateMovementSpeedPreview(timestamp) {
     stopMovementSpeedPreview();
     return;
   }
-  const stage = elements.movementSpeedPreviewStage.getBoundingClientRect();
-  const travelSpan = stage.width - (8 * 2) - 76;
+  const travelSpan = movementPreviewStageWidth - (8 * 2) - 76;
   if (!(travelSpan > 0)) {
     showMovementSpeedPreviewStatus('プレビュー欄に移動できる幅がありません。');
     return;
@@ -481,7 +540,8 @@ function animateMovementSpeedPreview(timestamp) {
       movementPreviewImageTransform(action, movementPreviewDirection),
     );
   }
-  elements.movementSpeedPreviewImage.style.left = `${8 + movementPreviewPosition}px`;
+  elements.movementSpeedPreviewWrapper.style.transform =
+    `translate3d(${movementPreviewPosition}px, -50%, 0)`;
   movementPreviewFrame = window.requestAnimationFrame(animateMovementSpeedPreview);
 }
 
@@ -513,8 +573,8 @@ function startMovementSpeedPreview(action) {
     && !elements.movementSpeedPreviewImage.hidden;
   if (!resumePausedPreview) stopMovementSpeedPreview();
   elements.movementSpeedPreview.hidden = false;
-  const stage = elements.movementSpeedPreviewStage.getBoundingClientRect();
-  if (!(stage.width - (8 * 2) - 76 > 0)) {
+  updateMovementPreviewStageWidth();
+  if (!(movementPreviewStageWidth - (8 * 2) - 76 > 0)) {
     showMovementSpeedPreviewStatus('プレビュー欄に移動できる幅がありません。');
     return;
   }
@@ -524,7 +584,7 @@ function startMovementSpeedPreview(action) {
     movementPreviewDirection = 1;
     elements.movementSpeedPreviewImage.src = action._assetUrl;
     elements.movementSpeedPreviewImage.hidden = false;
-    elements.movementSpeedPreviewImage.style.left = '8px';
+    elements.movementSpeedPreviewWrapper.style.transform = 'translate3d(0, -50%, 0)';
     applyImageTransform(
       elements.movementSpeedPreviewImage,
       movementPreviewImageTransform(action, movementPreviewDirection),
@@ -621,6 +681,8 @@ function disableUnavailableEditor() {
   elements.saveState.classList.remove('is-dirty', 'is-saved');
   elements.feedback.textContent = '設定機能を利用できません。デスクトップアプリを再起動してください。';
   elements.feedback.classList.add('is-error');
+  elements.loginAtStartupStatus.textContent = 'ログイン項目の状態を確認できません。デスクトップアプリを再起動してください。';
+  elements.loginAtStartupStatus.classList.add('is-error');
 }
 
 function setBusy(busy) {
@@ -631,8 +693,12 @@ function setBusy(busy) {
   state.busy = busy;
   if (busy) stopMovementSpeedPreview();
   updateSaveButtons();
-  elements.reloadButton.disabled = busy;
+  elements.distributionButton.disabled = busy;
+  elements.workspace.inert = busy && state.lockEdits;
   elements.addAction.disabled = busy || state.actions.length >= MAX_ACTIONS;
+  elements.duplicateAction.disabled = busy
+    || !selectedAction()
+    || state.actions.length >= MAX_ACTIONS;
   elements.actionFitInFrame.disabled = busy;
   elements.openSizeManager.disabled = busy;
   elements.openDurationBulk.disabled = busy || state.actions.length === 0;
@@ -727,6 +793,118 @@ function readableError(error) {
     .replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '');
 }
 
+function loginItemMessage(loginItem) {
+  if (!loginItem.supported) {
+    return 'この設定は、インストール済みのmacOSアプリで利用できます。';
+  }
+  if (loginItem.requiresApproval || loginItem.status === 'requires-approval') {
+    return 'macOSで許可が必要です。システム設定 → 一般 → ログイン項目を確認してください。';
+  }
+  if (loginItem.notFound || loginItem.status === 'not-found') {
+    return 'アプリをログイン項目に追加できませんでした。システム設定 → 一般 → ログイン項目から追加してください。';
+  }
+  return loginItem.enabled
+    ? '次回ログイン時から起動します。'
+    : 'ログイン時に起動しません。';
+}
+
+function loginItemManualAction(openAtLogin) {
+  return openAtLogin
+    ? 'システム設定 → 一般 → ログイン項目でアプリを追加または許可してください。'
+    : 'システム設定 → 一般 → ログイン項目でアプリをオフにするか、項目を削除してください。';
+}
+
+function updateLoginItemStatus(loginItem) {
+  if (!loginItem || typeof loginItem.supported !== 'boolean'
+    || typeof loginItem.enabled !== 'boolean') {
+    throw new Error('ログイン項目の状態を確認できませんでした。');
+  }
+  state.loginItemKnown = true;
+  state.loginItemSupported = loginItem.supported;
+  state.loginItemEnabled = loginItem.enabled;
+  elements.loginAtStartup.checked = loginItem.enabled;
+  elements.loginAtStartup.disabled = !loginItem.supported || state.loginItemWriting;
+  elements.loginAtStartupStatus.textContent = loginItemMessage(loginItem);
+  elements.loginAtStartupStatus.classList.remove('is-error');
+}
+
+function setLoginItemFailure(message) {
+  state.loginItemKnown = false;
+  elements.loginAtStartup.disabled = true;
+  elements.loginAtStartupStatus.textContent = `${message} システム設定 → 一般 → ログイン項目で現在の状態を確認してください。`;
+  elements.loginAtStartupStatus.classList.add('is-error');
+}
+
+function refreshLoginItemSettings() {
+  if (!state.apiAvailable || state.loginItemWriting) return Promise.resolve(null);
+  if (state.loginItemRefreshPromise) return state.loginItemRefreshPromise;
+  const generation = ++state.loginItemGeneration;
+  if (!state.loginItemKnown) {
+    elements.loginAtStartup.disabled = true;
+    elements.loginAtStartupStatus.textContent = 'ログイン項目の状態を確認中…';
+  }
+  const refresh = Promise.resolve().then(async () => {
+    try {
+      const loginItem = await window.mascotAPI.getLoginItemSettings();
+      if (generation === state.loginItemGeneration && !state.loginItemWriting) {
+        updateLoginItemStatus(loginItem);
+      }
+      return loginItem;
+    } catch (error) {
+      if (generation === state.loginItemGeneration && !state.loginItemWriting) {
+        setLoginItemFailure(`状態を確認できませんでした：${readableError(error)}`);
+      }
+      return null;
+    }
+  }).finally(() => {
+    if (state.loginItemRefreshPromise === refresh) state.loginItemRefreshPromise = null;
+  });
+  state.loginItemRefreshPromise = refresh;
+  return refresh;
+}
+
+async function setLoginAtStartup() {
+  if (!state.loginItemSupported || state.loginItemWriting) return false;
+  const requested = elements.loginAtStartup.checked;
+  elements.loginAtStartup.checked = state.loginItemEnabled;
+  state.loginItemWriting = true;
+  state.loginItemGeneration += 1;
+  elements.loginAtStartup.disabled = true;
+  elements.loginAtStartupStatus.textContent = 'ログイン項目を更新しています…';
+  elements.loginAtStartupStatus.classList.remove('is-error');
+  try {
+    const loginItem = await window.mascotAPI.setLoginItemSettings(requested);
+    updateLoginItemStatus(loginItem);
+    if (!loginItem.supported || loginItem.enabled !== requested) {
+      const status = loginItemMessage(loginItem);
+      elements.loginAtStartupStatus.textContent = `設定を反映できませんでした。${status} ${loginItemManualAction(requested)}`;
+      elements.loginAtStartupStatus.classList.add('is-error');
+      return false;
+    }
+    return true;
+  } catch (error) {
+    const failure = `自動起動を変更できませんでした：${readableError(error)}`;
+    let readbackError = null;
+    try {
+      const loginItem = await window.mascotAPI.getLoginItemSettings();
+      updateLoginItemStatus(loginItem);
+    } catch (error) {
+      readbackError = error;
+      state.loginItemKnown = false;
+      elements.loginAtStartup.checked = state.loginItemEnabled;
+    }
+    const readbackMessage = readbackError
+      ? `状態も確認できませんでした：${readableError(readbackError)}。`
+      : '現在の状態を再確認しました。';
+    elements.loginAtStartupStatus.textContent = `${failure} ${readbackMessage} ${loginItemManualAction(requested)}`;
+    elements.loginAtStartupStatus.classList.add('is-error');
+    return false;
+  } finally {
+    state.loginItemWriting = false;
+    elements.loginAtStartup.disabled = !state.loginItemKnown || !state.loginItemSupported;
+  }
+}
+
 function showToast(message, isError = false) {
   window.clearTimeout(toastTimer);
   elements.toast.textContent = message;
@@ -741,8 +919,7 @@ function setImagePreview(imageElement, placeholderElement, url) {
   const hasImage = Boolean(url);
   imageElement.hidden = !hasImage;
   placeholderElement.hidden = hasImage;
-  if (hasImage) imageElement.src = url;
-  else imageElement.removeAttribute('src');
+  setPreviewSource(imageElement, url);
 }
 
 async function resolveAction(action) {
@@ -905,18 +1082,16 @@ function refreshPendingStatus(message = '未保存の変更', feedback = null) {
   updateSaveButtons();
 }
 
-async function loadConfiguration({ askBeforeDiscard = false } = {}) {
+async function loadConfiguration() {
   if (!state.apiAvailable) {
     disableUnavailableEditor();
     return;
   }
-  if (askBeforeDiscard && state.dirty) {
-    const confirmed = window.confirm('保存していない変更を破棄しますか？');
-    if (!confirmed) return;
-  }
 
+  const previousDuplicatePaths = pendingDuplicatedImagePaths();
   const operation = beginOperation('load-configuration');
   if (!operation) return;
+  void refreshLoginItemSettings();
   try {
     elements.saveState.textContent = '読み込み中';
     elements.saveState.classList.remove('is-dirty', 'is-saved');
@@ -942,6 +1117,7 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
       state.loadWarnings = [];
       state.migrationWarnings = [];
       state.revision = 0;
+      await discardUnreferencedDuplicatedImages(previousDuplicatePaths);
       renderAll();
       state.dirty = false;
       window.mascotAPI.reportDirtyState(false);
@@ -963,6 +1139,7 @@ async function loadConfiguration({ askBeforeDiscard = false } = {}) {
       },
     };
     state.actions = actions;
+    await discardUnreferencedDuplicatedImages(previousDuplicatePaths);
     state.selectedId = actions[0]?._uiId || null;
     state.migrationPending = Array.isArray(editable?.pendingMigrations)
       && editable.pendingMigrations.includes('legacy-movement-speed');
@@ -1050,6 +1227,7 @@ function renderActionList() {
     const weightText = document.createElement('span');
     const weightInput = document.createElement('input');
     const selected = action._uiId === state.selectedId;
+    const actionId = action._uiId;
     const clipping = getActionClipping(action, action.imageTransform);
     const frameIssue = hasFrameIssue(clipping);
     const warningLabel = '⚠画像が枠からはみ出しています';
@@ -1093,8 +1271,10 @@ function renderActionList() {
 
     button.append(thumbnail, copy);
     button.addEventListener('click', () => {
+      const currentAction = state.actions.find((candidate) => candidate._uiId === actionId);
+      if (!currentAction) return;
       const previousId = state.selectedId;
-      state.selectedId = action._uiId;
+      state.selectedId = currentAction._uiId;
       updateActionListSelection(previousId, state.selectedId);
       renderEditor();
     });
@@ -1111,9 +1291,11 @@ function renderActionList() {
     weightInput.setAttribute('aria-label', `${action.name || 'この動作'}の選ばれやすさ`);
     weightInput.addEventListener('click', (event) => event.stopPropagation());
     weightInput.addEventListener('change', () => {
-      action.weight = positiveWeight(weightInput.value, 1);
-      weightInput.value = String(action.weight);
-      if (selectedAction()?._uiId === action._uiId) elements.actionWeight.value = String(action.weight);
+      const currentAction = state.actions.find((candidate) => candidate._uiId === actionId);
+      if (!currentAction) return;
+      currentAction.weight = positiveWeight(weightInput.value, 1);
+      weightInput.value = String(currentAction.weight);
+      if (selectedAction()?._uiId === actionId) elements.actionWeight.value = String(currentAction.weight);
       markDirty();
     });
     weightLabel.append(weightText, weightInput);
@@ -1121,7 +1303,10 @@ function renderActionList() {
     card.append(button, weightLabel);
     item.appendChild(card);
     elements.actionList.appendChild(item);
-    actionCardViews.set(action._uiId, { card, button, name, weightInput, warning });
+    actionCardViews.set(actionId, {
+      card, button, thumbnail, thumbnailImage: thumbnail.querySelector('img'),
+      name, meta, weightInput, warning,
+    });
   }
 }
 
@@ -1152,6 +1337,18 @@ function updateActionCardClipping(action) {
     if (frameIssue) view.name.appendChild(view.warning);
     else view.warning.remove();
   }
+}
+
+function updateActionCard(action) {
+  const view = actionCardViews.get(action?._uiId);
+  if (!view) return;
+  const displayName = action.name || '名前のない動作';
+  view.name.textContent = displayName;
+  view.meta.textContent = movementLabels[action.movement?.type] || '動き未設定';
+  view.weightInput.value = numberInputValue(action.weight, 1);
+  view.weightInput.setAttribute('aria-label', `${displayName}の選ばれやすさ`);
+  if (view.thumbnailImage) applyImageTransform(view.thumbnailImage, action.imageTransform);
+  updateActionCardClipping(action);
 }
 
 function refreshClippingIndicators() {
@@ -1243,8 +1440,12 @@ function fitActionMascotPreview() {
 
 function setPreviewSource(image, url) {
   // Avoid restarting GIFs when only layout or transforms change.
-  if (image.dataset.previewSource === (url || '')) return;
-  image.dataset.previewSource = url || '';
+  const source = url || '';
+  const sameSource = image.dataset.previewSource === source;
+  const failedSource = image.dataset.previewErrorSource === source;
+  if (sameSource && (!failedSource || !allowFailedPreviewRetry)) return;
+  image.dataset.previewSource = source;
+  image.dataset.previewErrorSource = '';
   if (url) image.src = url;
   else image.removeAttribute('src');
 }
@@ -1265,12 +1466,12 @@ function effectSceneGeometry(size, effect, image) {
 
 function renderPreviewScene(source, views, actual = false) {
   const { action, transform = action.imageTransform, size, effect } = source;
+  const box = actual ? null : previewContentBox(views.stage);
   setPreviewSource(views.image, action._assetUrl);
   applyImageTransform(views.image, transform);
   setPreviewSource(views.effect, effect?._assetUrl);
   views.effect.hidden = !effect?._assetUrl;
   const geometry = effectSceneGeometry(size, effect, views.effect);
-  const box = previewContentBox(views.stage);
   const ratio = actual ? 1 : previewFitRatio(geometry.width, geometry.height, box.width, box.height);
   if (!actual && !ratio) {
     views.label.textContent = 'プレビューを配置中…';
@@ -1321,7 +1522,7 @@ function openActualSizePreview(source) {
   renderActualSizePreview();
   elements.actualSizeViewport.scrollLeft = 0;
   elements.actualSizeViewport.scrollTop = 0;
-  requestAnimationFrame(renderActualSizePreview);
+  queuePreviewGeometry();
 }
 
 function closeActualSizePreview() {
@@ -1330,13 +1531,27 @@ function closeActualSizePreview() {
 }
 
 function refreshPreviewGeometry() {
-  if (selectedAction()?._assetUrl) {
-    fitActionMascotPreview();
+  const previousRetryPolicy = allowFailedPreviewRetry;
+  allowFailedPreviewRetry = false;
+  try {
+    if (selectedAction()?._assetUrl) {
+      fitActionMascotPreview();
+    }
+    if (elements.imageEditorDialog.open) activeImageEditor?.refreshGeometry();
+    if (elements.sizeManagerDialog.open) refreshSizeManagerPreviews?.();
+    renderEffectLivePreview();
+    renderActualSizePreview();
+  } finally {
+    allowFailedPreviewRetry = previousRetryPolicy;
   }
-  if (elements.imageEditorDialog.open) activeImageEditor?.refreshGeometry();
-  if (elements.sizeManagerDialog.open) refreshSizeManagerPreviews?.();
-  renderEffectLivePreview();
-  renderActualSizePreview();
+}
+
+function queuePreviewGeometry() {
+  if (previewGeometryFrame !== null) return;
+  previewGeometryFrame = requestAnimationFrame(() => {
+    previewGeometryFrame = null;
+    refreshPreviewGeometry();
+  });
 }
 
 function currentActionMeasurement(action) {
@@ -1418,6 +1633,7 @@ function renderEditor() {
   elements.emptyState.hidden = hasAction;
   elements.actionEditor.hidden = !hasAction;
   elements.actionDropzone.classList.toggle('has-image', Boolean(action?._assetUrl));
+  elements.duplicateAction.disabled = state.busy || !hasAction || state.actions.length >= MAX_ACTIONS;
   updateSaveButtons();
   if (!action) {
     elements.actionClippingStatus.textContent = '';
@@ -1437,12 +1653,15 @@ function renderEditor() {
   elements.actionActualSize.disabled = !action._assetUrl;
   elements.actionPreviewScale.hidden = !action._assetUrl;
   refreshPreviewGeometry();
-  requestAnimationFrame(refreshPreviewGeometry);
+  queuePreviewGeometry();
   elements.imageEditButton.disabled = !action._assetUrl;
   const clipping = updateClippingStatus(elements.actionClippingStatus, action, action.imageTransform);
   elements.actionFitInFrame.hidden = !hasFrameIssue(clipping);
   elements.actionFitInFrame.disabled = state.busy;
-  elements.actionFitInFrame.onclick = () => fitActionIntoFrame(action);
+  elements.actionFitInFrame.onclick = () => {
+    const currentAction = state.actions.find((candidate) => candidate._uiId === actionId);
+    if (currentAction) fitActionIntoFrame(currentAction);
+  };
   elements.actionName.value = action.name || '';
   elements.actionWeight.value = numberInputValue(action.weight, 1);
   elements.flipDirection.value = action.flipMode || 'direction';
@@ -1467,7 +1686,7 @@ function renderEditor() {
     elements.effectOffsetY.value = numberInputValue(action.effect.offsetY, 12);
     elements.effectWhileStill.checked = Boolean(action.effect.emitWhileStill);
     renderEffectLivePreview();
-    requestAnimationFrame(renderEffectLivePreview);
+    queuePreviewGeometry();
   } else {
     elements.effectLiveImage.hidden = true;
   }
@@ -1665,14 +1884,103 @@ async function applyDurationBulk() {
 function deleteSelectedAction() {
   const action = selectedAction();
   if (!action || state.actions.length <= 1) return;
-  if (!window.confirm(`「${action.name || 'この動作'}」を設定から削除しますか？\n画像ファイル自体は削除されません。`)) return;
+  if (!window.confirm(`「${action.name || 'この動作'}」を設定から削除しますか？\n保存済みの画像は削除されません。未保存の複製画像は、他で使われていなければ整理されます。`)) return;
 
   const index = state.actions.findIndex((candidate) => candidate._uiId === action._uiId);
+  const duplicatedAssetPaths = [...(action._duplicatedAssetPaths || [])];
   state.actions.splice(index, 1);
   state.selectedId = state.actions[Math.max(0, index - 1)]?._uiId || null;
   markDirty();
   renderActionList();
   renderEditor();
+  void discardUnreferencedDuplicatedImages(duplicatedAssetPaths);
+}
+
+function uniqueCopiedActionName(name) {
+  const baseName = `${String(name || '動作').trim() || '動作'} のコピー`;
+  const existingNames = new Set(state.actions.map((action) => String(action.name || '').trim()));
+  if (!existingNames.has(baseName)) return baseName;
+  let suffix = 2;
+  while (existingNames.has(`${baseName} ${suffix}`)) suffix += 1;
+  return `${baseName} ${suffix}`;
+}
+
+async function duplicateSelectedAction() {
+  if (!state.apiAvailable || state.busy || state.actions.length >= MAX_ACTIONS) return false;
+  const source = selectedAction();
+  if (!source) return false;
+  const sourceIndex = state.actions.findIndex((action) => action._uiId === source._uiId);
+  if (sourceIndex < 0) return false;
+
+  const operation = beginOperation('duplicate-action');
+  if (!operation) return false;
+  markDirty();
+  let copiedAssets = null;
+  try {
+    const snapshot = serializeAction(source, sourceIndex);
+    const snapshotJson = JSON.stringify(snapshot);
+    copiedAssets = await window.mascotAPI.duplicateActionAssets(
+      snapshot.file,
+      snapshot.effect?.file || null,
+    );
+    if (!copiedAssets?.main?.relativePath || !copiedAssets.main.assetUrl) {
+      throw new Error('画像ファイルを複製できませんでした。');
+    }
+
+    const currentIndex = state.actions.findIndex((action) => action._uiId === source._uiId);
+    const stillUnchanged = currentIndex >= 0
+      && state.actions[currentIndex] === source
+      && JSON.stringify(serializeAction(source, currentIndex)) === snapshotJson;
+    if (!stillUnchanged || state.actions.length >= MAX_ACTIONS) {
+      await discardUnreferencedDuplicatedImages([
+        copiedAssets.main.relativePath,
+        copiedAssets.effect?.relativePath,
+      ]);
+      if (state.actions.length >= MAX_ACTIONS) {
+        showError(`動作は${MAX_ACTIONS}件までです。追加の複製を作成できません。`);
+      }
+      refreshPendingStatus();
+      return false;
+    }
+    if (snapshot.effect && (
+      !copiedAssets.effect?.relativePath || !copiedAssets.effect.assetUrl
+    )) {
+      throw new Error('エフェクト画像を複製できませんでした。');
+    }
+
+    const duplicate = structuredClone(snapshot);
+    duplicate.name = uniqueCopiedActionName(source.name);
+    duplicate.file = copiedAssets.main.relativePath;
+    duplicate._uiId = newId();
+    duplicate._assetUrl = copiedAssets.main.assetUrl;
+    if (duplicate.effect) {
+      duplicate.effect.file = copiedAssets.effect.relativePath;
+      duplicate.effect._assetUrl = copiedAssets.effect.assetUrl;
+    }
+    duplicate._duplicatedAssetPaths = [
+      copiedAssets.main.relativePath,
+      ...(copiedAssets.effect ? [copiedAssets.effect.relativePath] : []),
+    ];
+    state.actions.splice(currentIndex + 1, 0, duplicate);
+    state.selectedId = duplicate._uiId;
+    renderActionList();
+    renderEditor();
+    requestVisibleContentMeasurements();
+    return true;
+  } catch (error) {
+    console.error(error);
+    if (copiedAssets) {
+      await discardUnreferencedDuplicatedImages([
+        copiedAssets.main?.relativePath,
+        copiedAssets.effect?.relativePath,
+      ]);
+    }
+    refreshPendingStatus();
+    showError(`動作を複製できませんでした：${readableError(error)}`);
+    return false;
+  } finally {
+    endOperation(operation);
+  }
 }
 
 function moveSelectedAction(direction) {
@@ -1720,14 +2028,51 @@ function stateReferencesAsset(relativePath) {
   ));
 }
 
+function stateAssetReferences() {
+  return state.actions.flatMap((action) => [
+    action.file,
+    action.effect?.file,
+  ]).filter(Boolean);
+}
+
 async function discardUnreferencedImportedImage(relativePath, category) {
   if (!relativePath || stateReferencesAsset(relativePath)) return false;
   try {
-    return await window.mascotAPI.discardImportedImage(relativePath, category);
+    return await window.mascotAPI.discardImportedImage(
+      relativePath,
+      category,
+      stateAssetReferences(),
+    );
   } catch (error) {
     console.warn('未使用の取り込み画像を整理できませんでした。', error);
     return false;
   }
+}
+
+async function discardUnreferencedDuplicatedImages(relativePaths) {
+  const protectedReferences = stateAssetReferences();
+  for (const relativePath of new Set(relativePaths || [])) {
+    if (!relativePath || protectedReferences.includes(relativePath)) continue;
+    const category = relativePath.startsWith('actions/')
+      ? 'actions'
+      : relativePath.startsWith('effects/')
+        ? 'effects'
+        : null;
+    if (!category) continue;
+    try {
+      await window.mascotAPI.discardImportedImage(
+        relativePath,
+        category,
+        protectedReferences,
+      );
+    } catch (error) {
+      console.warn('未使用の複製画像を整理できませんでした。', error);
+    }
+  }
+}
+
+function pendingDuplicatedImagePaths(actions = state.actions) {
+  return actions.flatMap((action) => action._duplicatedAssetPaths || []);
 }
 
 function rgbToHex({ r, g, b }) {
@@ -2061,20 +2406,31 @@ function setupDropzone(element, category, onImported) {
 function applyImportedActionImage(result, targetId) {
   const action = state.actions.find((candidate) => candidate._uiId === targetId);
   if (!action) return;
+  const replacedPath = action.file;
+  const duplicatedToRemove = (action._duplicatedAssetPaths || []).filter((relativePath) => (
+    relativePath === replacedPath
+  ));
   actionMeasurements.delete(action._uiId);
   action.file = result.relativePath;
   action._assetUrl = result.assetUrl;
   action.imageTransform = normalizeImageTransform();
+  action._duplicatedAssetPaths = (action._duplicatedAssetPaths || [])
+    .filter((relativePath) => !duplicatedToRemove.includes(relativePath));
   state.selectedId = targetId;
   markDirty();
   renderActionList();
   renderEditor();
   requestVisibleContentMeasurements();
+  void discardUnreferencedDuplicatedImages(duplicatedToRemove);
 }
 
 function applyImportedEffectImage(result, targetId) {
   const action = state.actions.find((candidate) => candidate._uiId === targetId);
   if (!action) return;
+  const replacedPath = action.effect?.file;
+  const duplicatedToRemove = (action._duplicatedAssetPaths || []).filter((relativePath) => (
+    relativePath === replacedPath
+  ));
   action.effect ||= {
     file: '',
     intervalMs: 450,
@@ -2087,9 +2443,12 @@ function applyImportedEffectImage(result, targetId) {
   };
   action.effect.file = result.relativePath;
   action.effect._assetUrl = result.assetUrl;
+  action._duplicatedAssetPaths = (action._duplicatedAssetPaths || [])
+    .filter((relativePath) => !duplicatedToRemove.includes(relativePath));
   state.selectedId = targetId;
   markDirty();
   renderEditor();
+  void discardUnreferencedDuplicatedImages(duplicatedToRemove);
 }
 
 const SIZE_MEASUREMENT_CACHE_TTL_MS = 6000;
@@ -3087,6 +3446,55 @@ function markNewerChangesPending() {
   );
 }
 
+async function createDistribution() {
+  if (!state.apiAvailable) {
+    disableUnavailableEditor();
+    return false;
+  }
+  if (state.busy) return false;
+
+  if (state.dirty && !(await saveConfiguration())) return false;
+  if (!state.persistedSnapshot || state.dirty || hasPendingChanges()) {
+    showError('設定を保存できていないため、配布版を作成できません。');
+    return false;
+  }
+
+  const revisionAtStart = state.revision;
+  const operation = beginOperation('create-distribution');
+  if (!operation) return false;
+  state.lockEdits = true;
+  elements.workspace.inert = true;
+  try {
+    if (state.revision !== revisionAtStart || hasPendingChanges()) {
+      throw new Error('設定に新しい変更があるため、配布版を作成できません。もう一度お試しください。');
+    }
+    const result = await window.mascotAPI.exportDistribution();
+    if (result?.canceled) {
+      showToast('配布版の作成をキャンセルしました。');
+      return false;
+    }
+    if (
+      result?.canceled !== false
+      || typeof result.fileName !== 'string'
+      || result.fileName.trim() === ''
+    ) {
+      throw new Error(result?.error || '配布版を作成できませんでした。');
+    }
+    if (state.revision !== revisionAtStart || hasPendingChanges()) {
+      throw new Error('作成中に設定が変更されました。配布版に最新の設定が含まれていない可能性があるため、作成結果を使用せず、もう一度お試しください。');
+    }
+    showToast(`配布版ZIPを作成しました：${result.fileName}`);
+    return true;
+  } catch (error) {
+    showError(readableError(error));
+    return false;
+  } finally {
+    state.lockEdits = false;
+    elements.workspace.inert = false;
+    endOperation(operation);
+  }
+}
+
 async function saveConfiguration() {
   if (!state.apiAvailable) {
     disableUnavailableEditor();
@@ -3259,9 +3667,13 @@ elements.rememberPosition.addEventListener('change', () => {
   state.config.mascot.rememberPosition = elements.rememberPosition.checked;
   markDirty();
 });
+elements.loginAtStartup.addEventListener('change', () => {
+  void setLoginAtStartup();
+});
 
 elements.addAction.addEventListener('click', addAction);
 elements.deleteAction.addEventListener('click', deleteSelectedAction);
+elements.duplicateAction.addEventListener('click', () => { void duplicateSelectedAction(); });
 elements.moveUp.addEventListener('click', () => moveSelectedAction(-1));
 elements.moveDown.addEventListener('click', () => moveSelectedAction(1));
 elements.actionName.addEventListener('input', updateActionName);
@@ -3270,17 +3682,19 @@ elements.actionWeight.addEventListener('change', () => {
     action.weight = readNumberInput(elements.actionWeight.value);
     if (Number.isFinite(action.weight)) elements.actionWeight.value = String(action.weight);
   });
-  renderActionList();
+  const action = selectedAction();
+  if (action) updateActionCard(action);
 });
 elements.flipDirection.addEventListener('change', () => editSelectedAction((action) => {
   action.flipMode = elements.flipDirection.value;
+  updateActionCard(action);
 }));
 elements.imageFlipX.addEventListener('change', () => {
   editSelectedAction((action) => {
     action.imageTransform = normalizeImageTransform(action.imageTransform);
     action.imageTransform.flipX = elements.imageFlipX.checked;
+    updateActionCard(action);
   });
-  renderActionList();
   renderEditor();
 });
 elements.durationMin.addEventListener('input', () => editSelectedAction((action) => {
@@ -3294,8 +3708,8 @@ elements.movementType.addEventListener('change', () => {
     action.movement.type = elements.movementType.value;
     if (elements.movementType.value === 'still') action.movement.speed = 0;
     else if (numberOr(action.movement.speed, 0) === 0) action.movement.speed = 55;
+    updateActionCard(action);
   });
-  renderActionList();
   renderEditor();
 });
 elements.movementSpeed.addEventListener('input', () => {
@@ -3312,6 +3726,11 @@ elements.movementSpeed.addEventListener('input', () => {
 });
 
 elements.effectEnabled.addEventListener('change', () => {
+  const action = selectedAction();
+  const removedEffectPath = elements.effectEnabled.checked ? null : action?.effect?.file;
+  const duplicatedToRemove = (action?._duplicatedAssetPaths || []).filter((relativePath) => (
+    relativePath === removedEffectPath
+  ));
   editSelectedAction((action) => {
     if (elements.effectEnabled.checked) {
       action.effect ||= {
@@ -3329,6 +3748,11 @@ elements.effectEnabled.addEventListener('change', () => {
       delete action.effect;
     }
   });
+  if (duplicatedToRemove.length > 0) {
+    action._duplicatedAssetPaths = (action._duplicatedAssetPaths || [])
+      .filter((relativePath) => !duplicatedToRemove.includes(relativePath));
+    void discardUnreferencedDuplicatedImages(duplicatedToRemove);
+  }
   renderEditor();
 });
 elements.effectInterval.addEventListener('input', () => {
@@ -3388,17 +3812,18 @@ setupDropzone(elements.effectDropzone, 'effects', applyImportedEffectImage);
 
 elements.recoveryBackup.addEventListener('click', () => recoverConfiguration('backup'));
 elements.recoveryDefaults.addEventListener('click', () => recoverConfiguration('defaults'));
-elements.reloadButton.addEventListener('click', () => loadConfiguration({ askBeforeDiscard: true }));
+elements.distributionButton.addEventListener('click', createDistribution);
 elements.headerSaveButton.addEventListener('click', saveConfiguration);
 elements.saveButton.addEventListener('click', saveConfiguration);
 elements.saveSelectedAction.addEventListener('click', saveSelectedAction);
 
 window.addEventListener('dragover', (event) => event.preventDefault());
 window.addEventListener('drop', (event) => event.preventDefault());
-window.addEventListener('pagehide', () => stopMovementSpeedPreview());
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) stopMovementSpeedPreview();
+window.addEventListener('focus', () => {
+  void refreshLoginItemSettings();
 });
+window.addEventListener('pagehide', () => stopMovementSpeedPreview());
+document.addEventListener('visibilitychange', handleMovementPreviewVisibility);
 elements.actionActualSize.addEventListener('click', () => openActualSizePreview(() => ({ action: selectedAction() })));
 elements.effectActualSize.addEventListener('click', () => openActualSizePreview(() => ({
   action: selectedAction(), effect: selectedAction()?.effect,
@@ -3415,16 +3840,18 @@ for (const image of [
   elements.actionPreview, elements.imageEditorPreview, elements.effectLiveMascotImage,
   elements.effectLiveImage, elements.actualSizeImage, elements.actualSizeEffect,
 ]) {
-  image.addEventListener('load', refreshPreviewGeometry);
-  image.addEventListener('error', refreshPreviewGeometry);
+  image.addEventListener('load', () => handlePreviewImageLoad(image));
+  image.addEventListener('error', () => handlePreviewImageError(image));
 }
-window.addEventListener('resize', refreshPreviewGeometry);
+window.addEventListener('resize', handlePreviewResize);
+window.addEventListener('beforeunload', cleanupPreviewScheduling);
 if (typeof ResizeObserver !== 'undefined') {
-  const previewResizeObserver = new ResizeObserver(refreshPreviewGeometry);
+  previewResizeObserver = new ResizeObserver(queuePreviewGeometry);
   for (const container of [elements.actionDropzone, elements.imageControlStack, elements.imageEditorStage, elements.sizeManagerGrid, elements.effectLivePreview]) {
     previewResizeObserver.observe(container);
   }
-  window.addEventListener('beforeunload', () => previewResizeObserver.disconnect());
+  movementPreviewStageObserver = new ResizeObserver(updateMovementPreviewStageWidth);
+  movementPreviewStageObserver.observe(elements.movementSpeedPreviewStage);
 }
 window.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {

@@ -101,6 +101,10 @@ export function createDomStub() {
       if (!documentListeners.has(type)) documentListeners.set(type, []);
       documentListeners.get(type).push(listener);
     },
+    removeEventListener(type, listener) {
+      const current = documentListeners.get(type) || [];
+      documentListeners.set(type, current.filter((candidate) => candidate !== listener));
+    },
     dispatchEvent(event) {
       for (const listener of documentListeners.get(event.type) || []) listener(event);
     },

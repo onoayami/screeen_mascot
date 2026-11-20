@@ -39,7 +39,7 @@
         </div>
       </section>
 
-      <main class="workspace">
+      <main id="workspace" class="workspace">
         <aside class="sidebar" aria-label="マスコットと動作の一覧">
           <section class="panel global-panel" aria-labelledby="global-heading">
             <div class="section-heading">
@@ -58,6 +58,14 @@
               <input id="remember-position" type="checkbox" />
               <span>ドラッグした位置を記憶する</span>
             </label>
+
+            <label class="check-row">
+              <input id="login-at-startup" type="checkbox" disabled />
+              <span>ログイン時に自動起動</span>
+            </label>
+            <p id="login-at-startup-status" class="login-item-status" role="status" aria-live="polite">
+              ログイン項目の状態を確認中…
+            </p>
           </section>
 
           <section class="actions-panel" aria-labelledby="actions-heading">
@@ -88,11 +96,12 @@
                 <label for="action-name" class="eyebrow">選択中の動作</label>
                 <input id="action-name" class="editor-name-input" type="text" maxlength="80" placeholder="動作の名前" />
               </div>
-              <div class="editor-tools" aria-label="動作の並び替え・削除・保存">
-                <button id="move-up" class="secondary-button compact-button" type="button">↑ 上へ</button>
-                <button id="move-down" class="secondary-button compact-button" type="button">↓ 下へ</button>
+              <div class="editor-tools" aria-label="動作の並び替え・削除・複製・保存">
                 <div class="editor-save-actions">
+                  <button id="move-up" class="secondary-button compact-button" type="button">↑ 上へ</button>
+                  <button id="move-down" class="secondary-button compact-button" type="button">↓ 下へ</button>
                   <button id="delete-action" class="danger-button compact-button" type="button">削除</button>
+                  <button id="duplicate-action" class="secondary-button compact-button" type="button">複製</button>
                   <button id="save-selected-action" class="primary-button compact-button" type="button" disabled>保存</button>
                 </div>
               </div>
@@ -199,7 +208,9 @@
                   <button id="movement-speed-preview-stop" class="secondary-button" type="button" disabled>止める</button>
                 </div>
                 <div id="movement-speed-preview-stage" class="movement-speed-preview-stage" aria-hidden="true">
-                  <img id="movement-speed-preview-image" class="movement-speed-preview-image" alt="" hidden />
+                  <div id="movement-speed-preview-wrapper" class="movement-speed-preview-wrapper">
+                    <img id="movement-speed-preview-image" class="movement-speed-preview-image" alt="" hidden />
+                  </div>
                 </div>
                 <p id="movement-speed-preview-note" class="movement-speed-preview-note" role="status">速さを変更するとプレビューします。</p>
                 <p class="movement-speed-preview-note">横移動で速さの目安を表示します（実際の移動方法とは異なります）。</p>
@@ -287,7 +298,7 @@
       <footer class="actionbar">
         <p id="feedback" class="feedback" aria-live="polite">変更すると、ここに保存状態が表示されます。</p>
         <div class="footer-actions">
-          <button id="reload-button" class="secondary-button" type="button">変更を破棄</button>
+          <button id="distribution-button" class="secondary-button" type="button">配布版作成</button>
           <button id="save-button" class="primary-button" type="button" disabled>保存して反映</button>
         </div>
       </footer>
@@ -487,7 +498,7 @@
           <button id="actual-size-close" class="dialog-close" type="button" aria-label="実寸表示を閉じる">×</button>
         </header>
         <p id="actual-size-scale" class="preview-scale" role="status"></p>
-        <p class="jpeg-dialog-description">調整中の内容を100%で表示します（1 CSS px＝実表示の1 CSS px）。大きい場合は縦横にスクロールできます。開閉では保存・確定しません。エフェクトは右向きの発生位置です。</p>
+        <p class="jpeg-dialog-description">調整中の内容を100%で表示します。<br />大きい場合は縦横にスクロールできます。<br />エフェクトは右向きの発生位置です。</p>
         <div id="actual-size-viewport" class="actual-size-viewport" tabindex="0" aria-label="実寸プレビュー（スクロールできます）">
           <div id="actual-size-scene" class="actual-size-scene">
             <div id="actual-size-mascot" class="effect-live-mascot">
